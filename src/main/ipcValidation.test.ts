@@ -5,7 +5,7 @@ import { validateIpcArguments, validatedIpcChannels } from "./ipcValidation";
 describe("validateIpcArguments", () => {
   it("accepts updater commands only without renderer-supplied URLs, paths or versions", () => {
     for (const channel of [
-      "app-update:get-state", "app-update:check", "app-update:download", "app-update:download-github", "app-update:cancel",
+      "app-update:get-state", "app-update:acknowledge-completion", "app-update:check", "app-update:download", "app-update:download-github", "app-update:cancel",
       "app-update:dismiss", "app-update:ignore-version", "app-update:install", "app-update:open-release", "app-update:startup-ready"
     ]) {
       expect(() => validateIpcArguments(channel, [])).not.toThrow();

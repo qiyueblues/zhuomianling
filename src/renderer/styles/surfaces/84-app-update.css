@@ -45,6 +45,11 @@
 .appUpdateReleaseLink:hover { color: #316cd9; }
 .appUpdateDialog button:focus-visible { outline: 2px solid #3979ed; outline-offset: 3px; }
 .appUpdateDialog button:disabled { opacity: .5; cursor: default; }
+.appUpdateInstalling { display: flex; align-items: center; gap: 14px; color: #3979ed; }
+.appUpdateSpinner { flex-shrink: 0; animation: appUpdateSpin 1s linear infinite; }
+.appUpdateSuccessToast { position: fixed; z-index: 1500; left: 50%; bottom: 32px; transform: translateX(-50%); display: flex; align-items: center; gap: 9px; padding: 13px 22px; border: 1px solid #d4e9dc; border-radius: 14px; background: #f2fbf5; color: #257449; box-shadow: 0 8px 32px #153b2526; font-size: 14px; pointer-events: none; }
+@keyframes appUpdateSpin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {
   .appUpdateDownload progress::-webkit-progress-value { transition: none; }
+  .appUpdateSpinner { animation: none; }
 }

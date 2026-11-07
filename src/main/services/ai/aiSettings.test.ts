@@ -77,11 +77,185 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   await fs.rm(temporaryDirectory, { recursive: true, force: true });
 });
 
 describe("AI API key storage", () => {
+  async function saveVerified(petId = "pet-a", baseUrl = "https://new.example.com", apiKey = "new-secret") {
+    const { saveAiConnection } = await import("./aiSettings");
+    return saveAiConnection({ petId, baseUrl, apiKey, providerName: "Fixture", model: "model-a" }, {
+      models: [{ id: "model-a", name: "model-a" }], checkedAt: "2026-11-07T00:00:00.000Z",
+      outputCapability: {
+        baseUrl, model: "model-a", mode: "json-schema", protocolTier: "full", streaming: true,
+        confidence: "tested", checkedAt: "2026-11-07T00:00:00.000Z", probeVersion: 2
+      }
+    });
+  }
+
+  it.each(["https://new.example.com", "https://old.example.com"])("preserves the old connection on metadata failure for %s", async (baseUrl) => {
+    await writeLegacySettings();
+    const { getAiConnectionConfig } = await import("./aiSettings");
+    await getAiConnectionConfig("pet-a");
+    const settingsPath = path.join(temporaryDirectory, "ai-connections.json");
+    const original = await fs.readFile(settingsPath, "utf8");
+    const originalRename = fs.rename.bind(fs);
+    const renameSpy = vi.spyOn(fs, "rename").mockImplementation(async (source, target) => {
+      if (String(target) === settingsPath) throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+      return originalRename(source, target);
+    });
+    const result = await saveVerified("pet-a", baseUrl);
+    renameSpy.mockRestore();
+    expect(result.test.ok).toBe(false);
+    expect(await fs.readFile(settingsPath, "utf8")).toBe(original);
+    await expect(getAiConnectionConfig("pet-a")).resolves.toMatchObject({ baseUrl: "https://old.example.com", apiKey: "legacy-secret" });
+    await expect(fs.access(path.join(temporaryDirectory, "ai-connection-transaction.json"))).rejects.toThrow();
+  });
+
+  it("recovers an interrupted rollback after restart without reverting other pets' secrets", async () => {
+    await writeLegacySettings();
+    await (await import("./aiSettings")).getAiConnectionConfig("pet-a");
+    const { setSecureString } = await import("../config/secureConfigStore");
+    await setSecureString("fixture", "pet-b", "other-secret");
+    let secureWrites = 0;
+    const originalRename = fs.rename.bind(fs);
+    const renameSpy = vi.spyOn(fs, "rename").mockImplementation(async (source, target) => {
+      if (String(target) === path.join(temporaryDirectory, "ai-connections.json")) throw new Error("metadata failure");
+      if (String(target) === path.join(temporaryDirectory, "secure-secrets.json") && ++secureWrites > 1) throw new Error("rollback failure");
+      return originalRename(source, target);
+    });
+    expect((await saveVerified()).test.ok).toBe(false);
+    const journalPath = path.join(temporaryDirectory, "ai-connection-transaction.json");
+    const journal = await fs.readFile(journalPath, "utf8");
+    expect(journal).not.toContain("legacy-secret");
+    expect(journal).not.toContain("new-secret");
+    renameSpy.mockRestore();
+    vi.resetModules();
+    const restarted = await import("./aiSettings");
+    await expect(restarted.getAiConnectionConfig("pet-a")).resolves.toMatchObject({ apiKey: "legacy-secret", baseUrl: "https://old.example.com" });
+    const { getSecureString } = await import("../config/secureConfigStore");
+    await expect(getSecureString("fixture", "pet-b")).resolves.toBe("other-secret");
+    await expect(fs.access(journalPath)).rejects.toThrow();
+  });
+
+  it("keeps the committed new connection when restarting before journal removal", async () => {
+    await writeLegacySettings();
+    await (await import("./aiSettings")).getAiConnectionConfig("pet-a");
+    const journalPath = path.join(temporaryDirectory, "ai-connection-transaction.json");
+    const originalRm = fs.rm.bind(fs);
+    const rmSpy = vi.spyOn(fs, "rm").mockImplementation(async (target, options) => {
+      if (String(target) === journalPath) throw new Error("interrupted before cleanup");
+      return originalRm(target, options);
+    });
+    await saveVerified();
+    await expect(fs.access(journalPath)).resolves.toBeUndefined();
+    rmSpy.mockRestore();
+    vi.resetModules();
+    const restarted = await import("./aiSettings");
+    await expect(restarted.getAiConnectionConfig("pet-a")).resolves.toMatchObject({ apiKey: "new-secret", baseUrl: "https://new.example.com" });
+    await expect(fs.access(journalPath)).rejects.toThrow();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not let readers observe a new key paired with old metadata", async () => {
+    await writeLegacySettings();
+    const { getAiConnectionConfig } = await import("./aiSettings");
+    await getAiConnectionConfig("pet-a");
+    let resumeCommit!: () => void;
+    let reachedCommit!: () => void;
+    const blocked = new Promise<void>((resolve) => { reachedCommit = resolve; });
+    const resume = new Promise<void>((resolve) => { resumeCommit = resolve; });
+    const originalRename = fs.rename.bind(fs);
+    const spy = vi.spyOn(fs, "rename").mockImplementation(async (source, target) => {
+      if (String(target) === path.join(temporaryDirectory, "ai-connections.json")) {
+        reachedCommit();
+        await resume;
+      }
+      return originalRename(source, target);
+    });
+    const saving = saveVerified();
+    await blocked;
+    let resolved = false;
+    const reading = getAiConnectionConfig("pet-a").then((value) => { resolved = true; return value; });
+    try {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      expect(resolved).toBe(false);
+    } finally { resumeCommit(); }
+    expect((await saving).test.ok).toBe(true);
+    await expect(reading).resolves.toMatchObject({ apiKey: "new-secret", baseUrl: "https://new.example.com" });
+    spy.mockRestore();
+  });
+
+  it("blocks reads and writes when the recovery journal has an unknown format", async () => {
+    await writeLegacySettings();
+    const { getAiConnectionConfig } = await import("./aiSettings");
+    await getAiConnectionConfig("pet-a");
+    const securePath = path.join(temporaryDirectory, "secure-secrets.json");
+    const previous = await fs.readFile(securePath, "utf8");
+    const journalPath = path.join(temporaryDirectory, "ai-connection-transaction.json");
+    const unknownJournal = '{"version":2,"future":true}';
+    await fs.writeFile(journalPath, unknownJournal);
+    await expect(getAiConnectionConfig("pet-a")).rejects.toThrow("AI_CONNECTION_TRANSACTION_CORRUPTED");
+    expect((await saveVerified()).test.ok).toBe(false);
+    expect(await fs.readFile(securePath, "utf8")).toBe(previous);
+    expect(await fs.readFile(journalPath, "utf8")).toBe(unknownJournal);
+  });
+
+  it("does not replace existing credentials when a first save cannot commit", async () => {
+    const originalRename = fs.rename.bind(fs);
+    const spy = vi.spyOn(fs, "rename").mockImplementation(async (source, target) => {
+      if (String(target) === path.join(temporaryDirectory, "ai-connections.json")) throw new Error("metadata failure");
+      return originalRename(source, target);
+    });
+    expect((await saveVerified()).test.ok).toBe(false);
+    spy.mockRestore();
+    const { getSecureString } = await import("../config/secureConfigStore");
+    await expect(getSecureString("ai-api-key", "pet-a")).resolves.toBeUndefined();
+    await expect((await import("./aiSettings")).getAiConnectionConfig("pet-a")).resolves.toBeUndefined();
+  });
+
+  it("rejects future versions before migrating credentials or writing files", async () => {
+    const original = JSON.stringify({ version: 4, future: { keep: true }, connections: {
+      "pet-a": { petId: "pet-a", baseUrl: "https://future.example", model: "model-a", apiKey: "future-secret" }
+    } });
+    const settingsPath = path.join(temporaryDirectory, "ai-connections.json");
+    await fs.writeFile(settingsPath, original);
+    const { getAiConnectionConfig, migrateLegacyAiConnections, deleteAiConnection } = await import("./aiSettings");
+    await expect(migrateLegacyAiConnections()).rejects.toMatchObject({ code: "CONFIG_VERSION_UNSUPPORTED" });
+    await expect(getAiConnectionConfig("pet-a")).rejects.toMatchObject({ code: "CONFIG_VERSION_UNSUPPORTED" });
+    expect((await saveVerified()).test).toMatchObject({ ok: false, code: "CONFIG_VERSION_UNSUPPORTED" });
+    await expect(deleteAiConnection("pet-a")).rejects.toMatchObject({ code: "CONFIG_VERSION_UNSUPPORTED" });
+    expect(await fs.readFile(settingsPath, "utf8")).toBe(original);
+    expect(electronMock.encryptString).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+    await expect(fs.access(path.join(temporaryDirectory, "secure-secrets.json"))).rejects.toThrow();
+  });
+
+  it.each([0, -1, "3", null, 2.5])("rejects invalid version %s without rewriting it", async (version) => {
+    const settingsPath = path.join(temporaryDirectory, "ai-connections.json");
+    const original = JSON.stringify({ version, connections: {} });
+    await fs.writeFile(settingsPath, original);
+    await expect((await import("./aiSettings")).migrateLegacyAiConnections()).rejects.toThrow(/版本无效/);
+    expect(await fs.readFile(settingsPath, "utf8")).toBe(original);
+  });
+
+  it("does not interpret an unrecognized unversioned file as an empty configuration", async () => {
+    const file = path.join(temporaryDirectory, "ai-connections.json");
+    await fs.writeFile(file, '{"unrecognized":true}');
+    await expect((await import("./aiSettings")).migrateLegacyAiConnections()).rejects.toThrow();
+    expect(await fs.readFile(file, "utf8")).toBe('{"unrecognized":true}');
+  });
+
+  it("does not migrate a malformed legacy connection or its plaintext key", async () => {
+    const file = path.join(temporaryDirectory, "ai-connections.json");
+    const original = JSON.stringify({ connections: { "pet-a": { unknownField: true, apiKey: "private-key" } } });
+    await fs.writeFile(file, original);
+    await expect((await import("./aiSettings")).migrateLegacyAiConnections()).rejects.toThrow(/unrecognized/);
+    expect(await fs.readFile(file, "utf8")).toBe(original);
+    expect(electronMock.encryptString).not.toHaveBeenCalled();
+  });
+
   it("canonicalizes endpoint bindings consistently", () => {
     expect(normalizeAiBaseUrl(" HTTPS://API.Example.COM:443/v1///#fragment ")).toBe(
       "https://api.example.com/v1"

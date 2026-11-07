@@ -9,6 +9,7 @@ import type {
 import { isPetMoodRangeId } from "../mood";
 import { normalizePetVoiceModelVersion } from "./petVoiceModel";
 import { normalizePetDesktopPosition, normalizePetDesktopScale } from "./petUiSettings";
+import { assertSupportedConfigVersion } from "./configVersion";
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -301,6 +302,7 @@ export function normalizePetMoodSettings(value: unknown): PetMoodSettings | unde
  */
 export function normalizeLegacyPetDefinition(pet: PetDefinition): PetDefinition {
   const rawPet = pet as unknown as UnknownRecord;
+  assertSupportedConfigVersion(rawPet.schemaVersion, 1);
   const capabilities = recordOrEmpty(rawPet.capabilities, "capabilities");
   const details = recordOrEmpty(rawPet.details, "details");
   const uiSettings = recordOrEmpty(rawPet.uiSettings, "uiSettings");
@@ -318,6 +320,7 @@ export function normalizeLegacyPetDefinition(pet: PetDefinition): PetDefinition 
 
   return {
     ...pet,
+    schemaVersion: 1,
     description: stringOrDefault(rawPet.description, "", "description"),
     modelPath: stringOrDefault(rawPet.modelPath, "", "modelPath"),
     personaPrompt: stringOrDefault(rawPet.personaPrompt, "", "personaPrompt"),

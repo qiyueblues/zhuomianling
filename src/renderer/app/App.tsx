@@ -160,18 +160,21 @@ function ConfigRecoveryDialog({
   onDismiss: () => void;
   onRestore: () => void | Promise<void>;
 }): JSX.Element {
+  const unsupportedVersion = corruption.code === "CONFIG_VERSION_UNSUPPORTED";
   return (
-    <div className="unsavedOverlay" role="dialog" aria-modal="true" aria-label="桌宠配置损坏">
+    <div className="unsavedOverlay" role="dialog" aria-modal="true" aria-label={unsupportedVersion ? "桌宠配置版本不兼容" : "桌宠配置损坏"}>
       <div className="unsavedDialog deletePetDialog">
         <span className="unsavedIcon deletePetIcon" aria-hidden="true">
           <AlertTriangle size={22} />
         </span>
         <div className="unsavedText deletePetText">
-          <h2>桌宠配置需要恢复</h2>
+          <h2>{unsupportedVersion ? "桌宠配置版本不兼容" : "桌宠配置需要恢复"}</h2>
           <p>{corruption.message}</p>
           <strong className="deletePetName">{corruption.petId}</strong>
           <p>
-            {corruption.backupAvailable
+            {unsupportedVersion
+              ? "请使用创建这份配置的版本或更新版本打开。其它桌宠仍可正常使用。"
+              : corruption.backupAvailable
               ? "程序没有覆盖损坏文件。你可以明确选择恢复最近一次有效备份。"
               : "程序没有覆盖损坏文件。当前没有可用备份，请从外部备份恢复后再重试。"}
           </p>
@@ -180,7 +183,7 @@ function ConfigRecoveryDialog({
           <button className="secondaryAction" type="button" disabled={restoring} onClick={onDismiss}>
             稍后处理
           </button>
-          {corruption.backupAvailable ? (
+          {!unsupportedVersion && corruption.backupAvailable ? (
             <button
               className="primaryAction"
               type="button"

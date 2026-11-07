@@ -15,7 +15,8 @@
     "start:prod": "cross-env NODE_ENV=production VITE_DEV_SERVER_URL= electron .",
     "preview:prod": "npm run build && npm run start:prod",
     "pack": "npm run build && npm run verify:memory-runtime && electron-builder --dir --publish never && npm run verify:packed-assets",
-    "dist:win": "npm run build && npm run verify:memory-runtime && electron-builder --win --publish never && npm run verify:packed-assets && npm run verify:update-artifacts",
+    "dist:win": "npm run build && npm run verify:memory-runtime && npm run prepare:installer-ui && electron-builder --win --publish never && npm run verify:packed-assets && npm run verify:update-artifacts",
+    "prepare:installer-ui": "node scripts/build-update-progress.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.electron.json",
     "verify:packed-assets": "node scripts/verify-packed-assets.mjs",
@@ -108,6 +109,7 @@
       ]
     },
     "nsis": {
+      "include": "scripts/nsis/update-installer.nsh",
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,

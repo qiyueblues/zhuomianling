@@ -14,7 +14,7 @@ vi.mock("../config/petConfigStore", () => ({
   testLocalPetVoiceModelConnection: vi.fn(), validateReferenceAudioDuration: vi.fn()
 }));
 vi.mock("../ai/aiSettings", () => ({
-  deleteAiConnection: vi.fn(), listAiModels: vi.fn(), saveAiConnection: vi.fn(), testAiOutputCapability: vi.fn()
+  deleteAiConnectionWhilePetConfigLocked: vi.fn(), listAiModels: vi.fn(), saveAiConnectionWhilePetConfigLocked: vi.fn(), testAiOutputCapability: vi.fn()
 }));
 // TIMED DIAGNOSTICS TEST MODULE: screen-vision capability import coverage.
 vi.mock("../screen/ScreenVisionConnectionStore", () => ({
@@ -28,7 +28,7 @@ vi.mock("../config/live2dImportService", () => ({ validateLive2DFolder: vi.fn() 
 
 import { beginPetPackageImport, cancelPetPackageImport, cleanupInterruptedPetPackageImports, commitPetPackageImport, listPetPackageImportAiModels, testPetPackageImportAi, testPetPackageImportVoice } from "./petPackageImportService";
 import { validateLive2DFolder } from "../config/live2dImportService";
-import { deleteAiConnection, listAiModels, saveAiConnection, testAiOutputCapability } from "../ai/aiSettings";
+import { deleteAiConnectionWhilePetConfigLocked as deleteAiConnection, listAiModels, saveAiConnectionWhilePetConfigLocked as saveAiConnection, testAiOutputCapability } from "../ai/aiSettings";
 import {
   clearChatVisionCapabilityWhilePetConfigLocked,
   saveChatVisionCapabilityWhilePetConfigLocked

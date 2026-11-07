@@ -124,6 +124,7 @@ export interface AiConnectionTestResult {
   code?:
     | "API_KEY_REQUIRED"
     | "INVALID_AI_SETTINGS"
+    | "CONFIG_VERSION_UNSUPPORTED"
     | "SECURE_STORAGE_UNAVAILABLE"
     | "SECURE_STORAGE_CORRUPTED";
 }

@@ -109,6 +109,31 @@ afterEach(async () => {
 });
 
 describe("pet config durable persistence", () => {
+  it("never overwrites a future local schema, including through backup restoration", async () => {
+    await writePetFixture();
+    const future = JSON.stringify({ ...createPet(), schemaVersion: 2, futureField: { keep: true } });
+    await fs.writeFile(getPetBackupPath(), JSON.stringify(createPet()));
+    await fs.writeFile(getPetConfigPath(), future);
+    const { getLocalPetDefinition, saveLocalPetPersona, restoreLocalPetConfigBackup } = await import("./petConfigStore");
+    await expect(getLocalPetDefinition("pet-a")).rejects.toMatchObject({ code: "CONFIG_VERSION_UNSUPPORTED" });
+    await expect(saveLocalPetPersona({ petId: "pet-a", personaPrompt: "new", chatLanguage: "zh", replyLength: "short" }))
+      .rejects.toMatchObject({ code: "CONFIG_VERSION_UNSUPPORTED" });
+    expect(await restoreLocalPetConfigBackup("pet-a")).toMatchObject({ ok: false, message: expect.stringMatching(/更新版本/) });
+    expect(await fs.readFile(getPetConfigPath(), "utf8")).toBe(future);
+    await writePetFixture("pet-b");
+    const scan = await (await import("./petConfigStore")).scanLocalPetsForRecovery();
+    expect(scan.pets.map((pet) => pet.id)).toEqual(["pet-b"]);
+    expect(scan.corruptions).toMatchObject([{ code: "CONFIG_VERSION_UNSUPPORTED", petId: "pet-a", backupAvailable: false }]);
+  });
+
+  it("persists the current local schema only on save", async () => {
+    await writePetFixture();
+    const { getLocalPetDefinition, saveLocalPetPersona } = await import("./petConfigStore");
+    expect((await getLocalPetDefinition("pet-a"))?.schemaVersion).toBe(1);
+    expect(JSON.parse(await fs.readFile(getPetConfigPath(), "utf8"))).not.toHaveProperty("schemaVersion");
+    await saveLocalPetPersona({ petId: "pet-a", personaPrompt: "saved", chatLanguage: "zh", replyLength: "short" });
+    expect(JSON.parse(await fs.readFile(getPetConfigPath(), "utf8")).schemaVersion).toBe(1);
+  });
   it("keeps the previous config intact when the atomic target rename fails", async () => {
     await writePetFixture();
     const originalContent = await fs.readFile(getPetConfigPath(), "utf8");

@@ -74,19 +74,23 @@ import {
   validateVoiceModelResources
 } from "../speech/voiceResourceValidation";
 import { deletePetSecrets, getSecureString, setSecureString } from "./secureConfigStore";
+import { UnsupportedConfigVersionError } from "../../../shared/validation/configVersion";
 import {
   writeBufferFileAtomically,
   writeJsonFileAtomically,
+  syncParentDirectory,
   writeTextFileAtomically
 } from "./durableJsonFile";
 import { withPetConfigWriteLock } from "./petConfigWriteQueue";
 import {
+  assertPathContained,
   assertExistingLocalPetDirectoryContained,
   ensureSafeLocalPetDirectory as ensureSafePetDirectory,
   ensureSafeLocalPetSubdirectory as ensureSafePetSubdirectory,
   getLocalPetConfigPath as getPetConfigPath,
   getLocalPetDirectoryPath as getPetDirectoryPath,
   getLocalPetsRootPath as getPetsRootPath,
+  getPetIdFromDeletionDirectory,
   isStoredPetDefinitionForId as isStoredPetDefinition,
   readValidPetConfigBackup,
   restorePetConfigBackupAtomically,
@@ -100,7 +104,6 @@ import {
 
 const live2dDirectoryName = "live2d";
 const avatarDraftPetIdPattern = /^draft-[a-z0-9]+$/;
-const interruptedPetDeletionPattern = /^\.deleting-([A-Za-z][A-Za-z0-9_-]{0,63})-([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$/;
 const avatarDraftFileNamePattern = /^avatar(?:-[A-Za-z0-9-]+)?\.(?:png|jpe?g|webp)$/i;
 const themeIdPattern = /^[A-Za-z][A-Za-z0-9_-]{1,39}$/;
 const builtInThemeIds = new Set(["soft", "rock", "pixel", "journal", "cyber", "minimal", "custom"]);
@@ -313,6 +316,15 @@ export class PetConfigCorruptedError extends Error {
     this.petId = petId;
     this.backupAvailable = backupAvailable;
     this.originalError = originalError;
+  }
+}
+
+export class PetConfigVersionUnsupportedError extends UnsupportedConfigVersionError {
+  readonly backupAvailable = false;
+
+  constructor(readonly petId: string) {
+    super();
+    this.name = "PetConfigVersionUnsupportedError";
   }
 }
 
@@ -1217,6 +1229,7 @@ async function readPetConfigUnlocked(
       isLocal: true
     });
   } catch (error) {
+    if (error instanceof UnsupportedConfigVersionError) throw new PetConfigVersionUnsupportedError(petId);
     if (
       error instanceof VoiceCredentialMigrationBlockedError ||
       error instanceof PetConfigCorruptedError
@@ -1469,7 +1482,7 @@ function normalizeCustomThemeRadialMenu(value: unknown): PetCustomThemeRadialMen
 
 export interface LocalPetRecoveryScanResult {
   pets: PetDefinition[];
-  corruptions: PetConfigCorruptedError[];
+  corruptions: Array<PetConfigCorruptedError | PetConfigVersionUnsupportedError>;
 }
 
 export async function scanLocalPetsForRecovery(): Promise<LocalPetRecoveryScanResult> {
@@ -1486,7 +1499,7 @@ export async function scanLocalPetsForRecovery(): Promise<LocalPetRecoveryScanRe
               )
             };
           } catch (error: unknown) {
-            if (error instanceof PetConfigCorruptedError) {
+            if (error instanceof PetConfigCorruptedError || error instanceof PetConfigVersionUnsupportedError) {
               return { corruption: error };
             }
 
@@ -1501,7 +1514,7 @@ export async function scanLocalPetsForRecovery(): Promise<LocalPetRecoveryScanRe
         .filter((pet): pet is PetDefinition => Boolean(pet)),
       corruptions: results
         .map((result) => result.corruption)
-        .filter((error): error is PetConfigCorruptedError => Boolean(error))
+        .filter((error): error is PetConfigCorruptedError | PetConfigVersionUnsupportedError => Boolean(error))
     };
   } catch (error: unknown) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
@@ -1799,18 +1812,22 @@ export async function cleanupInterruptedPetDeletions(
   }
   const deletedPetIds: string[] = [];
   for (const entry of entries) {
-    const match = interruptedPetDeletionPattern.exec(entry.name);
-    if (!match || !isValidPetId(match[1])) continue;
+    const petId = getPetIdFromDeletionDirectory(entry.name);
+    if (!petId) continue;
     const target = path.join(getPetsRootPath(), entry.name);
-    const stat = await fs.lstat(target);
-    if (!entry.isDirectory() || stat.isSymbolicLink()) continue;
     try {
-      await deletePetSecrets(match[1]);
-      await finalizeDeletion?.(match[1]);
-      await fs.rm(target, { recursive: true, force: true });
-      deletedPetIds.push(match[1]);
+      await withPetWriteLock(petId, async () => {
+        // Never clean credentials belonging to a new/externally restored pet.
+        const active = path.join(getPetsRootPath(), petId);
+        if (await fs.lstat(active).then(() => true, (error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return false;
+          throw error;
+        })) throw new Error("PET_DELETION_ID_CONFLICT");
+        await completePetDeletion(petId, target, { finalizeDeletion });
+      });
+      deletedPetIds.push(petId);
     } catch (error) {
-      console.warn("Failed to resume an interrupted pet deletion.", match[1], error);
+      console.warn("Failed to resume an interrupted pet deletion.", petId);
     }
   }
   return deletedPetIds;
@@ -3017,6 +3034,21 @@ export interface LocalPetDeleteOptions {
   finalizeDeletion?: (petId: string) => Promise<void>;
 }
 
+async function completePetDeletion(petId: string, directory: string, options: LocalPetDeleteOptions): Promise<void> {
+  const stat = await fs.lstat(directory);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("Unsafe pet deletion directory.");
+  const realRoot = await fs.realpath(getPetsRootPath());
+  const realUserData = await fs.realpath(app.getPath("userData"));
+  const realTarget = await fs.realpath(directory);
+  assertPathContained(realUserData, realRoot, "Unsafe pets root.");
+  assertPathContained(realRoot, realTarget, "Unsafe pet deletion directory.");
+  const finalize = options.finalizeDeletion ?? (await import("./petDeletionFinalizer")).finalizePetDeletionWhilePetConfigLocked;
+  await finalize(petId);
+  await deletePetSecrets(petId);
+  await (options.removeDirectory ?? ((target) => fs.rm(target, { recursive: true, force: true })))(directory);
+  await syncParentDirectory(directory);
+}
+
 export async function deleteLocalPet(
   petId: string,
   options: LocalPetDeleteOptions = {}
@@ -3053,17 +3085,15 @@ export async function deleteLocalPet(
     );
     await fs.rename(petDirectoryPath, deletingPath);
     try {
-      await deletePetSecrets(targetPetId);
-      await options.finalizeDeletion?.(targetPetId);
-      await (options.removeDirectory ?? ((directoryPath) =>
-        fs.rm(directoryPath, { recursive: true, force: true })))(deletingPath);
-    } catch (error) {
-      const originalMissing = await fs.access(petDirectoryPath).then(() => false, () => true);
-      const deletingExists = await fs.access(deletingPath).then(() => true, () => false);
-      if (originalMissing && deletingExists) {
-        await fs.rename(deletingPath, petDirectoryPath).catch(() => undefined);
-      }
-      throw error;
+      await syncParentDirectory(deletingPath);
+      await completePetDeletion(targetPetId, deletingPath, options);
+    } catch {
+      // Removal may have partially succeeded, including files and credentials.
+      // Keep the durable tombstone for idempotent forward recovery.
+      return {
+        ok: true, pendingCleanup: true, petId: targetPetId,
+        message: "桌宠已移除，部分本地数据暂未清理完成，将在下次启动时重试。"
+      };
     }
     return {
       ok: true,

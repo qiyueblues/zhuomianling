@@ -28,6 +28,7 @@ describe("updater release boundaries", () => {
     expect(config.devDependencies["ali-oss"]).toBe("6.23.0");
     expect(config.build.publish).toEqual(updateFeed("oss"));
     expect(config.build.releaseInfo).toEqual({ releaseNotesFile: "docs/releases/current.md" });
+    expect(config.build.nsis.include).toBe("scripts/nsis/update-installer.nsh");
     expect(config.scripts.build).toContain("verify:release-notes");
     expect(config.scripts["dist:win"]).toContain("--publish never");
     expect(config.scripts["dist:win"]).toContain("verify:update-artifacts");

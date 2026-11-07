@@ -86,6 +86,7 @@ describe("pet-resource local path boundary", () => {
     expect(() =>
       resolvePetResourcePathForProtocol("pet-resource://local/pet-a/pet.local.json")
     ).toThrow();
+    expect(() => resolvePetResourcePathForProtocol("pet-resource://local/pet-a/ai-connection-transaction.json")).toThrow();
     expect(() =>
       resolvePetResourcePathForProtocol("pet-resource://local/pet-a/voice/config.yaml")
     ).toThrow();
@@ -175,6 +176,7 @@ describe("pet-resource preview boundary", () => {
       "./petResourceProtocol"
     );
     const token = registerPetResourcePreviewRoot(temporaryDirectory);
+    expect(() => resolvePetResourcePathForProtocol(`pet-resource://preview/${token}/ai-connection-transaction.json`)).toThrow();
 
     expect(() =>
       resolvePetResourcePathForProtocol(

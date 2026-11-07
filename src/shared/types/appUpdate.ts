@@ -12,6 +12,7 @@ export interface AppUpdateState {
   downloadSource?: AppUpdateSource;
   prompt: boolean;
   ignoredVersion?: string;
+  completedVersion?: string;
   progress?: { percent: number; transferred: number; total: number; bytesPerSecond: number };
   message?: string;
 }

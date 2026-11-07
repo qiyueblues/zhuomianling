@@ -23,7 +23,7 @@ class FakeUpdater extends EventEmitter {
   quitAndInstall = vi.fn();
 }
 
-function setup(mode: AppUpdateState["mode"] = "installer", ignoredVersion?: string) {
+function setup(mode: AppUpdateState["mode"] = "installer", ignoredVersion?: string, completedVersion?: string) {
   const driver = new FakeUpdater();
   const githubDriver = new FakeUpdater();
   const createDriver = vi.fn((source: "oss" | "github", _version?: string) =>
@@ -33,7 +33,7 @@ function setup(mode: AppUpdateState["mode"] = "installer", ignoredVersion?: stri
   const closeConnections = vi.fn(async () => undefined);
   const onChanged = vi.fn();
   const service = new AppUpdateService({
-    createDriver, mode, currentVersion: "1.5.0", ignoredVersion,
+    createDriver, mode, currentVersion: "1.5.0", ignoredVersion, completedVersion,
     saveIgnoredVersion, prepareToInstall, closeConnections, onChanged
   });
   return { service, driver, githubDriver, createDriver, saveIgnoredVersion, prepareToInstall, closeConnections, onChanged };
@@ -43,6 +43,14 @@ beforeEach(() => { vi.useFakeTimers(); });
 afterEach(() => { vi.useRealTimers(); });
 
 describe("AppUpdateService", () => {
+  it("keeps the completion notice across checks until it has been shown", async () => {
+    const { service, driver } = setup("installer", undefined, "1.5.0");
+    driver.checkForUpdates.mockResolvedValue(result("1.5.0", false));
+    expect((await service.check()).completedVersion).toBe("1.5.0");
+    service.acknowledgeCompletion();
+    expect((await service.check()).completedVersion).toBeUndefined();
+    expect(driver.quitAndInstall).not.toHaveBeenCalled();
+  });
   it("preserves release-note paragraphs and lists as bounded plain text", async () => {
     const { service, driver } = setup();
     const release = result();
@@ -123,7 +131,7 @@ describe("AppUpdateService", () => {
     expect(driver.quitAndInstall).not.toHaveBeenCalled();
     // A later explicit retry can download the same release.
     driver.downloadUpdate.mockResolvedValue(["private-installer-path"]);
-    expect(await service.download()).toMatchObject({ phase: "downloaded" });
+    expect(await service.download()).toMatchObject({ phase: "installing" });
   });
 
   it("aborts a stalled download and can retry without exposing raw errors", async () => {
@@ -148,33 +156,36 @@ describe("AppUpdateService", () => {
     driver.emit("download-progress", { percent: 25, transferred: 1024, total: 4096, bytesPerSecond: 512, privateField: "private-file" });
     expect(service.getState().progress).toEqual({ percent: 25, transferred: 1024, total: 4096, bytesPerSecond: 512 });
     finish(["private-installer-path"]);
-    expect(await download).toMatchObject({ phase: "downloaded", prompt: true });
+    expect(await download).toMatchObject({ phase: "installing", prompt: true });
     expect(JSON.stringify(onChanged.mock.calls)).not.toContain("private-");
-    service.stop();
-    expect(driver.quitAndInstall).not.toHaveBeenCalled();
+    expect(driver.quitAndInstall).toHaveBeenCalledExactlyOnceWith(false, true);
   });
 
-  it("waits for shutdown cleanup and runs the installer once, only after explicit confirmation", async () => {
+  it("automatically installs the verified download once after waiting for shutdown cleanup", async () => {
     const { service, driver, prepareToInstall } = setup();
     expect(await service.install()).toEqual({ ok: false });
     await service.check();
-    await service.download();
     let finish!: () => void;
     prepareToInstall.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const download = service.download();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(service.getState().phase).toBe("installing");
     const install = service.install();
     expect(service.install()).toBe(install);
     expect(driver.quitAndInstall).not.toHaveBeenCalled();
+    // Download stall timers cannot cancel a valid installation preparation.
+    await vi.advanceTimersByTimeAsync(60_000);
     finish();
     expect(await install).toEqual({ ok: true });
+    expect(await download).toMatchObject({ phase: "installing" });
     expect(driver.quitAndInstall).toHaveBeenCalledExactlyOnceWith(false, true);
   });
 
   it("allows retry after cleanup failure and prevents installation after process shutdown", async () => {
     const { service, driver, prepareToInstall } = setup();
     await service.check();
-    await service.download();
     prepareToInstall.mockRejectedValue(new Error("private-cleanup-error"));
-    expect(await service.install()).toMatchObject({ ok: false });
+    expect(await service.download()).toMatchObject({ phase: "downloaded", message: "准备更新失败，请稍后重试。" });
     expect(service.getState().phase).toBe("downloaded");
     expect(driver.quitAndInstall).not.toHaveBeenCalled();
     let finish!: () => void;
@@ -189,13 +200,13 @@ describe("AppUpdateService", () => {
   it("does not proceed after an installer error while cleanup is pending", async () => {
     const { service, driver, prepareToInstall } = setup();
     await service.check();
-    await service.download();
     let finish!: () => void;
     prepareToInstall.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
-    const install = service.install();
+    const download = service.download();
+    await vi.advanceTimersByTimeAsync(0);
     driver.emit("error", new Error("private-installer-path"));
     finish();
-    expect(await install).toEqual({ ok: false });
+    await download;
     expect(driver.quitAndInstall).not.toHaveBeenCalled();
     expect(service.getState()).toMatchObject({ phase: "error", message: "无法启动更新安装程序，请重试或前往 GitHub 下载。" });
   });
@@ -225,7 +236,7 @@ describe("AppUpdateService", () => {
     const { service, driver, githubDriver, createDriver } = setup();
     expect(await service.check()).toMatchObject({ releaseNotes: "新增功能" });
     expect(createDriver.mock.calls).toEqual([["oss", undefined]]);
-    expect(await service.download()).toMatchObject({ phase: "downloaded", downloadSource: "oss" });
+    expect(await service.download()).toMatchObject({ phase: "installing", downloadSource: "oss" });
     expect(driver.downloadUpdate).toHaveBeenCalledOnce();
     expect(githubDriver.checkForUpdates).not.toHaveBeenCalled();
     expect(githubDriver.downloadUpdate).not.toHaveBeenCalled();
@@ -237,10 +248,10 @@ describe("AppUpdateService", () => {
     const release = result();
     release.updateInfo.releaseNotes = "备用来源的其他说明";
     githubDriver.checkForUpdates.mockResolvedValue(release);
-    expect(await service.download("github")).toMatchObject({ phase: "downloaded", downloadSource: "github", releaseNotes: "新增功能" });
+    expect(await service.download("github")).toMatchObject({ phase: "installing", downloadSource: "github", releaseNotes: "新增功能" });
     expect(createDriver).toHaveBeenLastCalledWith("github", "1.6.0");
     expect(driver.downloadUpdate).not.toHaveBeenCalled();
-    expect(await service.install()).toEqual({ ok: true });
+    expect(await service.install()).toEqual({ ok: false });
     expect(githubDriver.quitAndInstall).toHaveBeenCalledOnce();
     expect(driver.quitAndInstall).not.toHaveBeenCalled();
   });
@@ -268,11 +279,11 @@ describe("AppUpdateService", () => {
     service.cancelDownload();
     expect(await task).toMatchObject({ phase: "available", prompt: false, message: "已取消下载。" });
     expect(closeConnections).toHaveBeenCalled();
-    expect(await service.download()).toMatchObject({ phase: "downloaded", downloadSource: "oss" });
+    expect(await service.download()).toMatchObject({ phase: "installing", downloadSource: "oss" });
     finish(result());
     githubDriver.emit("download-progress", { percent: 90, transferred: 1, total: 1, bytesPerSecond: 1 });
     await vi.advanceTimersByTimeAsync(0);
-    expect(service.getState()).toMatchObject({ phase: "downloaded", downloadSource: "oss", progress: undefined });
+    expect(service.getState()).toMatchObject({ phase: "installing", downloadSource: "oss", progress: undefined });
     expect(githubDriver.downloadUpdate).not.toHaveBeenCalled();
     expect(driver.downloadUpdate).toHaveBeenCalledOnce();
   });
@@ -286,7 +297,7 @@ describe("AppUpdateService", () => {
     expect(await task).toMatchObject({ phase: "error", message: expect.stringContaining("长时间无响应") });
     expect(closeConnections).toHaveBeenCalled();
     expect(driver.downloadUpdate).not.toHaveBeenCalled();
-    expect(await service.download("github")).toMatchObject({ phase: "downloaded", downloadSource: "github" });
+    expect(await service.download("github")).toMatchObject({ phase: "installing", downloadSource: "github" });
     expect(githubDriver.downloadUpdate).toHaveBeenCalledOnce();
   });
 
@@ -298,5 +309,20 @@ describe("AppUpdateService", () => {
     await service.download("github");
     expect(githubDriver.checkForUpdates).not.toHaveBeenCalled();
     expect(driver.downloadUpdate).not.toHaveBeenCalled();
+  });
+
+  it.each(["cancel", "stop"] as const)("does not auto-install a late successful download after %s", async (action) => {
+    const { service, driver, prepareToInstall } = setup();
+    let finish!: (paths: string[]) => void;
+    driver.downloadUpdate.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    await service.check();
+    const download = service.download();
+    await vi.advanceTimersByTimeAsync(0);
+    if (action === "cancel") service.cancelDownload();
+    else service.stop();
+    finish(["private-installer-path"]);
+    await download;
+    expect(prepareToInstall).not.toHaveBeenCalled();
+    expect(driver.quitAndInstall).not.toHaveBeenCalled();
   });
 });

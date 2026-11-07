@@ -13,6 +13,7 @@ let emitState: (state: AppUpdateState) => void = () => undefined;
 let startupTimer: NodeJS.Timeout | undefined;
 let startupScheduled = false;
 let stopped = false;
+let completionAcknowledged = false;
 
 export function configureAppUpdates(options: {
   prepareToInstall: () => Promise<void>;
@@ -30,7 +31,18 @@ function getMode(): AppUpdateState["mode"] {
 }
 
 function initialState(): AppUpdateState {
-  return { mode: getMode(), phase: "idle", currentVersion: app.getVersion(), prompt: false };
+  const mode = getMode();
+  const currentVersion = app.getVersion();
+  return { mode, phase: "idle", currentVersion, prompt: false,
+    // NSIS only passes --updated when launching the successfully installed app.
+    // Do not infer success from a cached download or a pending install attempt.
+    completedVersion: !completionAcknowledged && mode === "installer" && process.argv.includes("--updated")
+      ? currentVersion : undefined };
+}
+
+export async function acknowledgeAppUpdateCompletion(): Promise<void> {
+  completionAcknowledged = true;
+  if (servicePromise) (await servicePromise).acknowledgeCompletion();
 }
 
 async function loadIgnoredVersion(): Promise<string | undefined> {
@@ -59,6 +71,7 @@ function getService(): Promise<AppUpdateService> {
         return activeDriver;
       },
       mode: getMode(), currentVersion: app.getVersion(), ignoredVersion,
+      completedVersion: initialState().completedVersion,
       saveIgnoredVersion: (version) => writeJsonFileAtomically(path.join(app.getPath("userData"), "app-updates.json"), { ignoredVersion: version }),
       prepareToInstall: () => prepareToInstall(),
       closeConnections: () => activeDriver?.netSession.closeAllConnections() ?? Promise.resolve(),

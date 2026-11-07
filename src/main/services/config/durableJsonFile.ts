@@ -38,6 +38,15 @@ async function syncDirectory(directoryPath: string): Promise<void> {
   }
 }
 
+export async function syncParentDirectory(filePath: string): Promise<void> {
+  await syncDirectory(path.dirname(filePath));
+}
+
+export async function removeFileDurably(filePath: string): Promise<void> {
+  await fs.rm(filePath, { force: true });
+  await syncParentDirectory(filePath);
+}
+
 async function renameWithTransientRetries(sourcePath: string, targetPath: string): Promise<void> {
   const retryDelaysMs = [0, 10, 25, 50];
   let lastError: unknown;

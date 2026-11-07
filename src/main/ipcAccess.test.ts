@@ -63,6 +63,7 @@ describe("assertIpcSenderAllowed", () => {
     for (const channel of [
       "pet-config:delete",
       "app-update:get-state",
+      "app-update:acknowledge-completion",
       "app-update:check",
       "app-update:download",
       "app-update:download-github",

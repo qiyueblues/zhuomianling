@@ -355,6 +355,8 @@ export interface ScreenAwarenessSettings {
 }
 
 export interface PetDefinition {
+  /** Missing in legacy local configurations; persisted on the next explicit save. */
+  schemaVersion?: 1;
   id: string;
   name: string;
   description: string;
@@ -513,12 +515,13 @@ export interface LocalPetAvatarCropSaveRequest {
 
 export interface LocalPetDeleteResult {
   ok: boolean;
+  pendingCleanup?: boolean;
   message: string;
   petId: string;
 }
 
 export interface LocalPetConfigCorruption {
-  code: "PET_CONFIG_CORRUPTED";
+  code: "PET_CONFIG_CORRUPTED" | "CONFIG_VERSION_UNSUPPORTED";
   petId: string;
   backupAvailable: boolean;
   message: string;

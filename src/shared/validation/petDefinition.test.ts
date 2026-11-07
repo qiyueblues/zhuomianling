@@ -11,6 +11,17 @@ function legacyPet(overrides: Record<string, unknown> = {}): PetDefinition {
 }
 
 describe("旧版桌宠配置兼容", () => {
+  it("只接受已知版本并且仅在内存中补齐旧配置版本", () => {
+    const original = legacyPet();
+    expect(normalizeLegacyPetDefinition(original).schemaVersion).toBe(1);
+    expect(original).not.toHaveProperty("schemaVersion");
+    expect(normalizeLegacyPetDefinition(legacyPet({ schemaVersion: 1 })).schemaVersion).toBe(1);
+    expect(() => normalizeLegacyPetDefinition(legacyPet({ schemaVersion: 2 })))
+      .toThrow(/更新版本/);
+    for (const schemaVersion of [0, -1, "1", null, 1.5]) {
+      expect(() => normalizeLegacyPetDefinition(legacyPet({ schemaVersion }))).toThrow(/版本无效/);
+    }
+  });
   it("为旧配置缺失的运行时字段提供内存默认值", () => {
     const original = legacyPet({
       details: { scenarios: ["学习"] },

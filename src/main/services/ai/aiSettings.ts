@@ -18,6 +18,7 @@ export { normalizeAiBaseUrl } from "../../../shared/types/ai";
 import {
   assertSecureStorageAvailable,
   deleteSecureString,
+  encryptSecureString,
   getSecureString,
   SecureStorageCorruptedError,
   SecureStorageUnavailableError,
@@ -25,6 +26,10 @@ import {
 } from "../config/secureConfigStore";
 import { writeJsonFileAtomically } from "../config/durableJsonFile";
 import { probeAiOutputCapability } from "./aiCapabilityProbe";
+import { assertSupportedConfigVersion, UnsupportedConfigVersionError } from "../../../shared/validation/configVersion";
+import { assertValidPetId } from "../../../shared/validation/petId";
+import { withPetConfigWriteLock } from "../config/petConfigWriteQueue";
+import { commitAiConnectionTransaction, recoverAiConnectionTransaction } from "./aiConnectionTransaction";
 
 interface AiSettingsFile {
   version: 3;
@@ -57,7 +62,6 @@ const fullProtocolDowngradeThreshold = 3;
 
 let settingsMutationQueue: Promise<void> = Promise.resolve();
 let migrationPromise: Promise<void> | undefined;
-const petMutationQueues = new Map<string, Promise<void>>();
 const fullProtocolDowngradeFailures = new Map<string, number>();
 
 interface CachedAiModelsVerification {
@@ -323,13 +327,14 @@ function normalizeStoredConfig(petId: string, value: unknown): AiConnectionConfi
 }
 
 function parseSettingsFile(value: unknown): ParsedAiSettingsFile {
-  if (!value || typeof value !== "object") {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("AI settings file is invalid.");
   }
 
   const candidate = value as { version?: unknown; connections?: unknown };
+  assertSupportedConfigVersion(candidate.version, 3, [1, 2]);
 
-  if (candidate.connections !== undefined && (!candidate.connections || typeof candidate.connections !== "object")) {
+  if (!candidate.connections || typeof candidate.connections !== "object" || Array.isArray(candidate.connections)) {
     throw new Error("AI settings connections are invalid.");
   }
 
@@ -339,14 +344,18 @@ function parseSettingsFile(value: unknown): ParsedAiSettingsFile {
   let needsRewrite = candidate.version !== 3;
 
   for (const [connectionId, rawConnection] of Object.entries(rawConnections)) {
-    const normalizedConnection = normalizeStoredConfig(connectionId, rawConnection);
-    connections[connectionId] = normalizedConnection;
-
-    if (!rawConnection || typeof rawConnection !== "object") {
-      continue;
+    assertValidPetId(connectionId);
+    if (!rawConnection || typeof rawConnection !== "object" || Array.isArray(rawConnection)) {
+      throw new Error("AI settings connection is invalid.");
     }
-
     const legacyConnection = rawConnection as Record<string, unknown>;
+    if (typeof legacyConnection.baseUrl !== "string" || !legacyConnection.baseUrl.trim() ||
+      typeof legacyConnection.model !== "string") {
+      throw new Error("AI settings connection structure is unrecognized.");
+    }
+    const normalizedConnection = normalizeStoredConfig(connectionId, rawConnection);
+    if (normalizedConnection.petId !== connectionId) throw new Error("AI settings pet binding is invalid.");
+    connections[connectionId] = normalizedConnection;
 
     if (legacyConnection.outputCapability && typeof legacyConnection.outputCapability === "object" && (
       !("protocolTier" in (legacyConnection.outputCapability as Record<string, unknown>)) ||
@@ -403,7 +412,11 @@ async function writeSettingsFile(settings: AiSettingsFile): Promise<void> {
 }
 
 function runSettingsMutation<T>(mutation: () => Promise<T>): Promise<T> {
-  const result = settingsMutationQueue.then(mutation, mutation);
+  const operation = async (): Promise<T> => {
+    await recoverAiConnectionTransaction(async (petId) => (await readSettingsFile()).settings.connections[petId]);
+    return mutation();
+  };
+  const result = settingsMutationQueue.then(operation, operation);
   settingsMutationQueue = result.then(
     () => undefined,
     () => undefined
@@ -413,20 +426,7 @@ function runSettingsMutation<T>(mutation: () => Promise<T>): Promise<T> {
 }
 
 function runPetMutation<T>(petId: string, mutation: () => Promise<T>): Promise<T> {
-  const previous = petMutationQueues.get(petId) ?? Promise.resolve();
-  const result = previous.then(mutation, mutation);
-  const queueTail = result.then(
-    () => undefined,
-    () => undefined
-  );
-  petMutationQueues.set(petId, queueTail);
-  void queueTail.finally(() => {
-    if (petMutationQueues.get(petId) === queueTail) {
-      petMutationQueues.delete(petId);
-    }
-  });
-
-  return result;
+  return withPetConfigWriteLock(petId, mutation);
 }
 
 export async function migrateLegacyAiConnections(): Promise<void> {
@@ -471,7 +471,12 @@ export async function migrateLegacyAiConnections(): Promise<void> {
 
 async function readSettings(): Promise<AiSettingsFile> {
   await migrateLegacyAiConnections();
-  return (await readSettingsFile()).settings;
+  return runSettingsMutation(async () => (await readSettingsFile()).settings);
+}
+
+async function readResolvedSettings<T>(reader: (settings: AiSettingsFile) => Promise<T>): Promise<T> {
+  await migrateLegacyAiConnections();
+  return runSettingsMutation(async () => reader((await readSettingsFile()).settings));
 }
 
 function normalizeDraft(draft: AiConnectionDraft): AiConnectionDraft {
@@ -515,6 +520,9 @@ function getSettingsFailure(
   error: unknown,
   checkedAt: string
 ): Pick<AiConnectionTestResult, "ok" | "message" | "checkedAt" | "code"> {
+  if (error instanceof UnsupportedConfigVersionError) {
+    return { ok: false, message: error.message, checkedAt, code: error.code };
+  }
   if (error instanceof SecureStorageUnavailableError) {
     return {
       ok: false,
@@ -578,7 +586,7 @@ async function resolveApiKey(
   }
 
   return {
-    apiKey: await getSecureString(aiApiKeyScope, draft.petId, existingConfig.baseUrl),
+    apiKey: await runSettingsMutation(() => getSecureString(aiApiKeyScope, draft.petId, existingConfig.baseUrl)),
     endpointChanged: false
   };
 }
@@ -689,36 +697,29 @@ async function fetchAiModels(
 }
 
 export async function listAiConnectionSummaries(): Promise<AiConnectionSummary[]> {
-  const settings = await readSettings();
-  return Promise.all(Object.values(settings.connections).map(toSummary));
+  return readResolvedSettings((settings) => Promise.all(Object.values(settings.connections).map(toSummary)));
 }
 
 export async function getAiConnectionSummary(
   petId: string
 ): Promise<AiConnectionSummary | undefined> {
   const normalizedPetId = petId.trim();
-  const settings = await readSettings();
-  const config = settings.connections[normalizedPetId];
-  return config ? toSummary(config) : undefined;
+  return readResolvedSettings(async (settings) => {
+    const config = settings.connections[normalizedPetId];
+    return config ? toSummary(config) : undefined;
+  });
 }
 
 export async function getAiConnectionConfig(
   petId: string
 ): Promise<ResolvedAiConnectionConfig | undefined> {
   const normalizedPetId = petId.trim();
-  const settings = await readSettings();
-  const config = settings.connections[normalizedPetId];
-
-  if (!config) {
-    return undefined;
-  }
-
-  const apiKey = await getSecureString(aiApiKeyScope, config.petId, config.baseUrl);
-
-  return {
-    ...config,
-    apiKey: apiKey ?? ""
-  };
+  return readResolvedSettings(async (settings) => {
+    const config = settings.connections[normalizedPetId];
+    if (!config) return undefined;
+    const apiKey = await getSecureString(aiApiKeyScope, config.petId, config.baseUrl);
+    return { ...config, apiKey: apiKey ?? "" };
+  });
 }
 
 export async function listAiModels(draft: AiConnectionDraft, signal?: AbortSignal): Promise<AiModelListResult> {
@@ -886,6 +887,15 @@ export async function saveAiConnection(
   draft: AiConnectionDraft,
   verifiedEvidence?: VerifiedAiConnectionEvidence
 ): Promise<AiConnectionSaveResult> {
+  if (!draft.petId.trim()) return saveAiConnectionWhilePetConfigLocked(draft, verifiedEvidence);
+  return runPetMutation(draft.petId.trim(), () => saveAiConnectionWhilePetConfigLocked(draft, verifiedEvidence));
+}
+
+/** Used by imports that already hold the shared per-pet lock. */
+export async function saveAiConnectionWhilePetConfigLocked(
+  draft: AiConnectionDraft,
+  verifiedEvidence?: VerifiedAiConnectionEvidence
+): Promise<AiConnectionSaveResult> {
   const normalized = normalizeDraft(draft);
 
   if (!normalized.petId) {
@@ -901,7 +911,7 @@ export async function saveAiConnection(
     };
   }
 
-  return runPetMutation(normalized.petId, async () => {
+  return (async () => {
     const checkedAt = new Date().toISOString();
     const verifiedModels = verifiedEvidence ? normalizeModelOptions(verifiedEvidence.models) : undefined;
     const verifiedCapability = verifiedEvidence
@@ -944,17 +954,11 @@ export async function saveAiConnection(
 
     const existingConfig = settings.connections[normalized.petId];
 
+    let ciphertext: string;
     try {
       assertSecureStorageAvailable();
-      // Encrypt and persist before contacting the endpoint. This proves that
-      // the new key can be stored safely; a broken encryption backend must
-      // never discover the key only after it has already been sent.
-      await setSecureString(
-        aiApiKeyScope,
-        normalized.petId,
-        resolution.apiKey,
-        normalized.baseUrl
-      );
+      // Check encryption before networking, while keeping the saved key intact.
+      ciphertext = encryptSecureString(resolution.apiKey, normalized.baseUrl);
     } catch (error: unknown) {
       return {
         config: toUnsavedSummary(normalized),
@@ -1017,7 +1021,7 @@ export async function saveAiConnection(
             ? normalized.models
             : existingConfig?.models ?? [],
       outputCapability,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date(Math.max(Date.now(), (Date.parse(existingConfig?.updatedAt ?? "") || 0) + 1)).toISOString()
     };
     const test: AiConnectionTestResult = {
       ok: modelsResult.ok,
@@ -1040,11 +1044,12 @@ export async function saveAiConnection(
       await runSettingsMutation(async () => {
         const latestSettings = (await readSettingsFile()).settings;
 
-        // The bound secret was stored before networking. If the process stops
-        // before metadata is replaced, the binding check makes the partial
-        // update fail closed for a changed endpoint.
         latestSettings.connections[normalized.petId] = config;
-        await writeSettingsFile(latestSettings);
+        await commitAiConnectionTransaction(
+          config, ciphertext,
+          () => writeSettingsFile(latestSettings),
+          async (petId) => (await readSettingsFile()).settings.connections[petId]
+        );
       });
     } catch (error: unknown) {
       return {
@@ -1071,7 +1076,7 @@ export async function saveAiConnection(
       },
       test
     };
-  });
+  })();
 }
 
 export async function deleteAiConnection(petId: string): Promise<void> {
@@ -1081,19 +1086,20 @@ export async function deleteAiConnection(petId: string): Promise<void> {
     return;
   }
 
-  await runPetMutation(normalizedPetId, async () => {
-    clearAiVerificationCache(normalizedPetId);
-    await migrateLegacyAiConnections();
-    await runSettingsMutation(async () => {
-      const settings = (await readSettingsFile()).settings;
-      await deleteSecureString(aiApiKeyScope, normalizedPetId);
+  await runPetMutation(normalizedPetId, () => deleteAiConnectionWhilePetConfigLocked(normalizedPetId));
+}
 
-      if (!(normalizedPetId in settings.connections)) {
-        return;
-      }
-
+/** Caller must hold the shared pet configuration lock. */
+export async function deleteAiConnectionWhilePetConfigLocked(normalizedPetId: string): Promise<void> {
+  assertValidPetId(normalizedPetId);
+  clearAiVerificationCache(normalizedPetId);
+  await migrateLegacyAiConnections();
+  await runSettingsMutation(async () => {
+    const settings = (await readSettingsFile()).settings;
+    if (normalizedPetId in settings.connections) {
       delete settings.connections[normalizedPetId];
       await writeSettingsFile(settings);
-    });
+    }
+    await deleteSecureString(aiApiKeyScope, normalizedPetId);
   });
 }

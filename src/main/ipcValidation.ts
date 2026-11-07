@@ -77,6 +77,7 @@ const speechSessionIdPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$/;
 export const validatedIpcChannels = new Set([
   "app:get-version",
   "app-update:get-state",
+  "app-update:acknowledge-completion",
   "app-update:check",
   "app-update:download",
   "app-update:download-github",
@@ -690,6 +691,7 @@ export function validateIpcArguments(channel: string, args: unknown[]): void {
   const noArgumentChannels = new Set([
     "app:get-version",
     "app-update:get-state",
+    "app-update:acknowledge-completion",
     "app-update:check",
     "app-update:download",
     "app-update:download-github",

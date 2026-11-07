@@ -11,6 +11,7 @@ interface UpdateServiceOptions {
   mode: AppUpdateMode;
   currentVersion: string;
   ignoredVersion?: string;
+  completedVersion?: string;
   saveIgnoredVersion: (version: string) => Promise<void>;
   prepareToInstall: () => Promise<void>;
   closeConnections: () => Promise<void>;
@@ -79,7 +80,7 @@ export class AppUpdateService {
   constructor(private readonly options: UpdateServiceOptions) {
     this.state = {
       mode: options.mode, phase: "idle", currentVersion: options.currentVersion,
-      ignoredVersion: options.ignoredVersion, prompt: false
+      ignoredVersion: options.ignoredVersion, completedVersion: options.completedVersion, prompt: false
     };
   }
 
@@ -106,6 +107,10 @@ export class AppUpdateService {
 
   getState(): AppUpdateState {
     return { ...this.state, progress: this.state.progress ? { ...this.state.progress } : undefined };
+  }
+
+  acknowledgeCompletion(): void {
+    this.patch({ completedVersion: undefined });
   }
 
   private patch(patch: Partial<AppUpdateState>): void {
@@ -179,13 +184,14 @@ export class AppUpdateService {
 
   download(source: AppUpdateSource = "oss"): Promise<AppUpdateState> {
     if (this.downloadTask) return this.downloadTask;
-    if (this.stopped || this.checkTask || this.state.mode !== "installer" || !this.expectedInstaller || !this.state.latestVersion ||
+    if (this.stopped || this.checkTask || this.installTask || this.state.mode !== "installer" || !this.expectedInstaller || !this.state.latestVersion ||
       !["available", "error"].includes(this.state.phase)) return Promise.resolve(this.getState());
     this.downloadTask = this.performDownload(source).finally(() => { this.downloadTask = undefined; });
     return this.downloadTask;
   }
 
   private async performDownload(source: AppUpdateSource): Promise<AppUpdateState> {
+    let verified = false;
     const token = new CancellationToken();
     this.downloadToken = token;
     this.cancelRequested = false;
@@ -210,6 +216,7 @@ export class AppUpdateService {
       if (this.downloadTimedOut) throw new Error("update-download-timeout");
       if (!token.cancelled && !this.stopped) {
         this.installedDriver = driver;
+        verified = true;
         this.patch({ phase: "downloaded", progress: undefined, prompt: true });
       }
     } catch (error) {
@@ -228,6 +235,11 @@ export class AppUpdateService {
       this.downloadToken = undefined;
       token.dispose();
       if (this.cancelRequested) this.patch({ phase: "available", progress: undefined, message: "已取消下载。", prompt: false });
+    }
+    // Starting this download is the user's consent to install this exact
+    // release. Clear download cancellation/timers before shutdown begins.
+    if (verified && !this.stopped && !this.cancelRequested && this.state.phase === "downloaded") {
+      await this.install();
     }
     return this.getState();
   }
@@ -271,6 +283,8 @@ export class AppUpdateService {
       try {
         await this.options.prepareToInstall();
         if (this.stopped || this.state.phase !== "installing") return { ok: false };
+        // --updated uses our NSIS progress-only flow. A visible progress page
+        // survives this process exiting; --force-run opens the new app.
         this.installedDriver!.quitAndInstall(false, true);
         return { ok: this.state.phase === "installing" };
       } catch {

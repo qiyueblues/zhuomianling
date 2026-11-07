@@ -6,6 +6,7 @@ import { normalizeLegacyPetDefinition } from "../../../shared/validation/petDefi
 import { assertValidPetId, isValidPetId } from "../../../shared/validation/petId";
 import { writeJsonFileAtomically } from "./durableJsonFile";
 import { withPetConfigWriteLock } from "./petConfigWriteQueue";
+import { assertSupportedConfigVersion, UnsupportedConfigVersionError } from "../../../shared/validation/configVersion";
 
 const localPetsDirectoryName = "pets";
 const localPetFileName = "pet.local.json";
@@ -77,6 +78,7 @@ async function ensureRealDirectoryContained(
 }
 
 export async function ensureSafeLocalPetDirectory(petId: string): Promise<string> {
+  await assertNoPendingPetDeletion(petId);
   const petDirectoryPath = getLocalPetDirectoryPath(petId);
   await ensureRealDirectoryContained(
     getLocalPetsRootPath(),
@@ -84,6 +86,36 @@ export async function ensureSafeLocalPetDirectory(petId: string): Promise<string
     "Pet directory escaped the local pets root."
   );
   return petDirectoryPath;
+}
+
+export async function assertNoPendingPetDeletion(petId: string): Promise<void> {
+  const target = assertValidPetId(petId).toLocaleLowerCase("en-US");
+  const names = await fs.readdir(getLocalPetsRootPath()).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return [] as string[];
+    throw error;
+  });
+  if (names.some((name) => getPetIdFromDeletionDirectory(name)?.toLocaleLowerCase("en-US") === target)) {
+    throw new Error("这只桌宠仍有待完成的删除，请重启软件完成清理后再使用此 ID。");
+  }
+}
+
+export function getPetIdFromDeletionDirectory(name: string): string | undefined {
+  const match = /^\.deleting-(.+)-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/iu.exec(name);
+  return match && isValidPetId(match[1]) ? match[1] : undefined;
+}
+
+async function assertCurrentPetConfigVersion(petId: string): Promise<void> {
+  let content: string;
+  try {
+    content = await fs.readFile(getLocalPetConfigPath(petId), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  // A damaged file can only be replaced by the explicit restore operation.
+  const current = JSON.parse(content.replace(/^\uFEFF/, "")) as unknown;
+  if (!isRecord(current)) throw new Error("桌宠配置损坏。");
+  assertSupportedConfigVersion(current.schemaVersion, 1);
 }
 
 export async function assertExistingLocalPetDirectoryContained(
@@ -160,13 +192,16 @@ export async function writePetConfigFileAtomically(
   }
 
   await ensureSafeLocalPetDirectory(targetPetId);
-  await writeJsonFileAtomically(getLocalPetConfigPath(targetPetId), pet, {
+  await assertCurrentPetConfigVersion(targetPetId);
+  const normalized = normalizeLegacyPetDefinition(pet);
+  await writeJsonFileAtomically(getLocalPetConfigPath(targetPetId), normalized, {
     backup: {
       filePath: getLocalPetConfigBackupPath(targetPetId),
       source: backupSource,
       validateCurrent: (value) =>
         isStoredPetDefinitionForId(value, targetPetId) &&
-        !containsLegacyPlaintextVoiceCredentials(value)
+        !containsLegacyPlaintextVoiceCredentials(value) &&
+        Boolean(normalizeLegacyPetDefinition(value))
     }
   });
 }
@@ -198,6 +233,12 @@ export async function restorePetConfigBackupAtomically(
   const targetPetId = assertValidPetId(petId);
 
   return withPetConfigWriteLock(targetPetId, async () => {
+    // Explicit recovery may replace corrupt JSON, but never a valid future format.
+    try {
+      await assertCurrentPetConfigVersion(targetPetId);
+    } catch (error) {
+      if (error instanceof UnsupportedConfigVersionError || (error as NodeJS.ErrnoException).code) throw error;
+    }
     const backupPet = await readValidPetConfigBackup(targetPetId);
 
     if (!backupPet) {
@@ -206,7 +247,7 @@ export async function restorePetConfigBackupAtomically(
 
     await validateBeforeRestore?.(backupPet);
     await ensureSafeLocalPetDirectory(targetPetId);
-    await writeJsonFileAtomically(getLocalPetConfigPath(targetPetId), backupPet);
+    await writeJsonFileAtomically(getLocalPetConfigPath(targetPetId), normalizeLegacyPetDefinition(backupPet));
     return backupPet;
   });
 }

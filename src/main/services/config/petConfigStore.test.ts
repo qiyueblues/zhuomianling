@@ -225,22 +225,85 @@ describe("Tencent ASR credential migration", () => {
     expect(secureContent).toContain("pet-b");
   });
 
-  it("rolls an interrupted pet deletion back with its complete memory directory", async () => {
+  it("keeps a partially deleted pet hidden and completes cleanup after restart", async () => {
     await writeLegacyPet();
     const memoryFile = path.join(getPetDirectory(), "memory", "pending", "turn.json");
     await fs.mkdir(path.dirname(memoryFile), { recursive: true });
     await fs.writeFile(memoryFile, "durable-memory", "utf8");
     const { deleteLocalPet } = await import("./petConfigStore");
+    const { setSecureString } = await import("./secureConfigStore");
+    await setSecureString("fixture", "pet-a", "old-secret");
 
     await expect(deleteLocalPet("pet-a", {
-      removeDirectory: async () => { throw new Error("injected deletion failure"); }
-    })).rejects.toThrow(/injected deletion failure/);
+      removeDirectory: async (directory) => {
+        await fs.rm(path.join(directory, "memory"), { recursive: true });
+        throw new Error("injected deletion failure");
+      }
+    })).resolves.toMatchObject({ ok: true, pendingCleanup: true });
 
-    await expect(fs.readFile(getPetConfigPath(), "utf8")).resolves.toContain('"id": "pet-a"');
-    await expect(fs.readFile(memoryFile, "utf8")).resolves.toBe("durable-memory");
+    await expect(fs.access(getPetDirectory())).rejects.toThrow();
+    await expect(fs.access(memoryFile)).rejects.toThrow();
     expect((await fs.readdir(path.join(temporaryDirectory, "pets"))).some((name) =>
       name.startsWith(".deleting-pet-a-")
-    )).toBe(false);
+    )).toBe(true);
+    const { ensureSafeLocalPetDirectory } = await import("./petConfigPersistence");
+    await expect(ensureSafeLocalPetDirectory("PET-A")).rejects.toThrow(/待完成的删除/);
+    vi.resetModules();
+    const restarted = await import("./petConfigStore");
+    await expect(restarted.cleanupInterruptedPetDeletions()).resolves.toEqual(["pet-a"]);
+    expect(await fs.readdir(path.join(temporaryDirectory, "pets"))).toEqual([]);
+    const { getSecureString } = await import("./secureConfigStore");
+    await expect(getSecureString("fixture", "pet-a")).resolves.toBeUndefined();
+  });
+
+  it("resumes both AI and vision metadata cleanup after a failed normal finalizer", async () => {
+    await writeLegacyPet();
+    const aiPath = path.join(temporaryDirectory, "ai-connections.json");
+    const visionPath = path.join(temporaryDirectory, "screen-vision-connections.json");
+    const connection = { petId: "pet-a", baseUrl: "https://fixture.example", model: "model-a" };
+    await fs.writeFile(aiPath, JSON.stringify({ version: 3, connections: { "pet-a": connection } }));
+    await fs.writeFile(visionPath, JSON.stringify({ version: 1, pets: { "pet-a": { independent: connection }, "pet-b": {} } }));
+    const { setSecureString, getSecureString } = await import("./secureConfigStore");
+    await setSecureString("ai-api-key", "pet-a", "ai-secret", connection.baseUrl);
+    await setSecureString("screen-vision-api-key", "pet-a", "vision-secret", connection.baseUrl);
+    await setSecureString("fixture", "pet-b", "keep-me");
+    const originalRename = fs.rename.bind(fs);
+    const renameSpy = vi.spyOn(fs, "rename").mockImplementation(async (source, target) => {
+      if (String(target) === visionPath) throw new Error("injected vision write failure");
+      return originalRename(source, target);
+    });
+    const { deleteLocalPet } = await import("./petConfigStore");
+    try {
+      await expect(deleteLocalPet("pet-a")).resolves.toMatchObject({ ok: true, pendingCleanup: true });
+      await expect(fs.access(getPetDirectory())).rejects.toThrow();
+      expect(JSON.parse(await fs.readFile(visionPath, "utf8")).pets).toHaveProperty("pet-a");
+    } finally {
+      renameSpy.mockRestore();
+    }
+    vi.resetModules();
+    const restarted = await import("./petConfigStore");
+    await expect(restarted.cleanupInterruptedPetDeletions()).resolves.toEqual(["pet-a"]);
+    expect(JSON.parse(await fs.readFile(aiPath, "utf8")).connections).not.toHaveProperty("pet-a");
+    const vision = JSON.parse(await fs.readFile(visionPath, "utf8")).pets;
+    expect(vision).not.toHaveProperty("pet-a");
+    expect(vision).toHaveProperty("pet-b");
+    await expect(getSecureString("screen-vision-api-key", "pet-a")).resolves.toBeUndefined();
+    await expect(getSecureString("fixture", "pet-b")).resolves.toBe("keep-me");
+  });
+
+  it("does not clean a tombstone's credentials when its pet ID is occupied", async () => {
+    await writeLegacyPet();
+    const tombstone = path.join(temporaryDirectory, "pets", ".deleting-pet-a-123e4567-e89b-12d3-a456-426614174000");
+    await fs.mkdir(tombstone);
+    const { setSecureString, getSecureString } = await import("./secureConfigStore");
+    await setSecureString("fixture", "pet-a", "active-secret");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const { cleanupInterruptedPetDeletions } = await import("./petConfigStore");
+      await expect(cleanupInterruptedPetDeletions()).resolves.toEqual([]);
+      await expect(getSecureString("fixture", "pet-a")).resolves.toBe("active-secret");
+      await expect(fs.access(tombstone)).resolves.toBeUndefined();
+    } finally { warn.mockRestore(); }
   });
 
   it("cleans only recognized interrupted deletion tombstones on startup", async () => {
@@ -258,6 +321,19 @@ describe("Tencent ASR credential migration", () => {
 
     await expect(fs.access(recognized)).rejects.toThrow();
     await expect(fs.access(unknown)).resolves.toBeUndefined();
+  });
+
+  it.each(["中文桌宠", "123-pet"])("resumes deletion for canonical pet ID %s", async (petId) => {
+    const directory = path.join(temporaryDirectory, "pets", `.deleting-${petId}-123e4567-e89b-12d3-a456-426614174000`);
+    await fs.mkdir(directory, { recursive: true });
+    const { setSecureString, getSecureString } = await import("./secureConfigStore");
+    await setSecureString("fixture", petId, "pending-secret");
+    const { assertNoPendingPetDeletion } = await import("./petConfigPersistence");
+    await expect(assertNoPendingPetDeletion(petId)).rejects.toThrow(/待完成的删除/);
+    const { cleanupInterruptedPetDeletions } = await import("./petConfigStore");
+    await expect(cleanupInterruptedPetDeletions()).resolves.toEqual([petId]);
+    await expect(getSecureString("fixture", petId)).resolves.toBeUndefined();
+    await expect(fs.access(directory)).rejects.toThrow();
   });
 
   it("keeps an interrupted deletion tombstone when external cleanup cannot finish", async () => {

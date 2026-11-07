@@ -71,7 +71,6 @@ import type {
 import { cancelAiChatStreams, startAiChatStream } from "./services/ai/aiChat";
 import {
   getAiConnectionSummary,
-  deleteAiConnection,
   listAiModels,
   listAiConnectionSummaries,
   saveAiConnection,
@@ -150,7 +149,7 @@ import { startupProfiler } from "./startupProfiler";
 import {
   getAppUpdateState, checkAppUpdates, scheduleStartupUpdateCheck,
   downloadAppUpdate, cancelAppUpdate, dismissAppUpdate, ignoreAppUpdateVersion,
-  installAppUpdate, openAppUpdateReleasePage
+  installAppUpdate, openAppUpdateReleasePage, acknowledgeAppUpdateCompletion
 } from "./appUpdates";
 import { presetVoiceGenerationService } from "./services/presetVoice/PresetVoiceGenerationService";
 import { exportPetPackage, inspectPetPackageExport } from "./services/petPackage/petPackageExportService";
@@ -323,6 +322,7 @@ export function registerIpc(ipcMain: IpcMain, getMainWindow: () => BrowserWindow
   handle("app:get-version", "main", () => app.getVersion());
 
   handle("app-update:get-state", "main", getAppUpdateState);
+  handle("app-update:acknowledge-completion", "main", acknowledgeAppUpdateCompletion);
   handle("app-update:check", "main", checkAppUpdates);
   handle("app-update:download", "main", () => downloadAppUpdate());
   handle("app-update:download-github", "main", () => downloadAppUpdate("github"));
@@ -655,12 +655,7 @@ export function registerIpc(ipcMain: IpcMain, getMainWindow: () => BrowserWindow
     await screenCaptureService.stopForPet(petId);
     const result = await memoryManagementService.runPetDeletion(
       petId,
-      () => deleteLocalPet(petId, {
-        finalizeDeletion: async (deletingPetId) => {
-          await deleteAiConnection(deletingPetId);
-          await screenVisionService.deleteForPetWhilePetConfigLocked(deletingPetId);
-        }
-      })
+      () => deleteLocalPet(petId)
     );
 
     if (result.ok) {

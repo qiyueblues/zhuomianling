@@ -19,14 +19,14 @@ import type {
 import type { VisionCapability } from "../../../shared/types/screen";
 import { PET_PACKAGE_LIMITS, allocateImportedPetId, normalizePetPackageEntryPath, parsePetPackageManifest, parsePortablePetDefinition } from "../../../shared/validation/petPackage";
 import { normalizeLegacyPetDefinition } from "../../../shared/validation/petDefinition";
-import { deleteAiConnection, listAiModels, saveAiConnection, testAiOutputCapability } from "../ai/aiSettings";
+import { deleteAiConnectionWhilePetConfigLocked, listAiModels, saveAiConnectionWhilePetConfigLocked, testAiOutputCapability } from "../ai/aiSettings";
 import {
   clearChatVisionCapabilityWhilePetConfigLocked,
   saveChatVisionCapabilityWhilePetConfigLocked
 } from "../screen/ScreenVisionConnectionStore";
 import { testChatVisionDraft } from "../screen/ScreenVisionService";
 import { writeJsonFileAtomically } from "../config/durableJsonFile";
-import { getLocalPetsRootPath } from "../config/petConfigPersistence";
+import { assertNoPendingPetDeletion, getLocalPetsRootPath } from "../config/petConfigPersistence";
 import { withPetConfigWriteLock } from "../config/petConfigWriteQueue";
 import { listLocalPets, stopManagedGptSoVitsApi, validateReferenceAudioDuration } from "../config/petConfigStore";
 import { validateVoiceModelResources } from "../speech/voiceResourceValidation";
@@ -382,6 +382,7 @@ export async function commitPetPackageImport(sessionId: string, ownerWebContents
     const result = await withPetConfigWriteLock(session.candidatePetId, async () => {
       const occupied = new Set((await listLocalPets()).map((pet) => pet.id.toLocaleLowerCase("en-US")));
       if (occupied.has(session.candidatePetId.toLocaleLowerCase("en-US"))) throw new Error("桌宠 ID 已被占用，请重新导入。");
+      await assertNoPendingPetDeletion(session.candidatePetId);
       let pet = materializePet(session);
       const finalDirectory = path.join(getLocalPetsRootPath(), session.candidatePetId);
       pet = {
@@ -399,7 +400,7 @@ export async function commitPetPackageImport(sessionId: string, ownerWebContents
       await fs.rename(session.stagingPath, finalDirectory);
       try {
         if (session.aiDraft) {
-          const saved = await saveAiConnection(
+          const saved = await saveAiConnectionWhilePetConfigLocked(
             { ...session.aiDraft, petId: pet.id },
             {
               models: session.aiDraft.models ?? [],
@@ -412,7 +413,7 @@ export async function commitPetPackageImport(sessionId: string, ownerWebContents
         }
       } catch (error) {
         if (session.aiVisionCapability) await clearChatVisionCapabilityWhilePetConfigLocked(pet.id).catch(() => undefined);
-        await deleteAiConnection(pet.id).catch(() => undefined);
+        await deleteAiConnectionWhilePetConfigLocked(pet.id).catch(() => undefined);
         await fs.rename(finalDirectory, session.stagingPath).catch(() => undefined);
         await writeJsonFileAtomically(session.markerPath, { kind: "zmling-import-staging", sessionId: session.id }).catch(() => undefined);
         throw error;

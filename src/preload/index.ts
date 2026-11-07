@@ -116,6 +116,7 @@ const desktopPetApi = {
   getAppVersion: () => ipcRenderer.invoke("app:get-version") as Promise<string>,
   appUpdate: {
     getState: () => ipcRenderer.invoke("app-update:get-state") as Promise<AppUpdateState>,
+    acknowledgeCompletion: () => ipcRenderer.invoke("app-update:acknowledge-completion") as Promise<void>,
     check: () => ipcRenderer.invoke("app-update:check") as Promise<AppUpdateState>,
     download: () => ipcRenderer.invoke("app-update:download") as Promise<AppUpdateState>,
     downloadGithub: () => ipcRenderer.invoke("app-update:download-github") as Promise<AppUpdateState>,

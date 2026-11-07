@@ -200,20 +200,38 @@ export async function setSecureString(
   binding?: string
 ): Promise<void> {
   validateSecretAddress(scope, petId);
+  await setSecureStringCiphertext(scope, petId, encryptSecureString(value, binding));
+}
+
+/** Main-process persistence only; never expose ciphertext or snapshots over IPC. */
+export function encryptSecureString(value: string, binding?: string): string {
   assertSecureStorageAvailable();
   const payload: SecureStringPayload = {
     version: 1,
     value,
     ...(binding === undefined ? {} : { binding })
   };
-  const ciphertext = safeStorage.encryptString(JSON.stringify(payload)).toString("base64");
+  return safeStorage.encryptString(JSON.stringify(payload)).toString("base64");
+}
+
+export async function getSecureStringCiphertext(scope: string, petId: string): Promise<string | undefined> {
+  validateSecretAddress(scope, petId);
+  return (await readSecureSecretsFile()).secrets[scope]?.[petId];
+}
+
+export async function setSecureStringCiphertext(scope: string, petId: string, ciphertext: string | undefined): Promise<void> {
+  validateSecretAddress(scope, petId);
+  if (ciphertext !== undefined && !isBase64Ciphertext(ciphertext)) throw new SecureStorageCorruptedError();
 
   await runSerializedMutation(async () => {
     const settings = await readSecureSecretsFile();
-    settings.secrets[scope] = {
-      ...(settings.secrets[scope] ?? {}),
-      [petId]: ciphertext
-    };
+    if (ciphertext === undefined) {
+      if (!settings.secrets[scope]?.[petId]) return;
+      delete settings.secrets[scope][petId];
+      if (!Object.keys(settings.secrets[scope]).length) delete settings.secrets[scope];
+    } else {
+      settings.secrets[scope] = { ...(settings.secrets[scope] ?? {}), [petId]: ciphertext };
+    }
     await writeSecureSecretsFile(settings);
   });
 }

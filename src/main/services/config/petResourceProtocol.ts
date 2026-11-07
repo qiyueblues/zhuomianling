@@ -24,6 +24,7 @@ const previewResourceExtensions = new Set([
   ".webp"
 ]);
 const blockedPreviewFileNames = new Set([
+  "ai-connection-transaction.json",
   "ai-connections.json",
   "pet.local.json",
   "secure-secrets.json",

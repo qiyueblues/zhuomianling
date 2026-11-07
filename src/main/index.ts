@@ -14,7 +14,7 @@ import {
   resetLocalPetVoiceRuntimeState,
   stopManagedGptSoVitsApi
 } from "./services/config/petConfigStore";
-import { deleteAiConnection, migrateLegacyAiConnections } from "./services/ai/aiSettings";
+import { migrateLegacyAiConnections } from "./services/ai/aiSettings";
 import { clearSafeAppCaches } from "./services/cache/appCacheCleanup";
 import { shutdownAllMemorySidecars } from "./services/memory/memorySidecarRuntime";
 import { configureMemoryRecallRuntime } from "./services/memory/memoryRecall";
@@ -168,7 +168,7 @@ if (!gotLock) {
     await startupProfiler.measureOnce(
       "interrupted-pet-deletions-cleaned",
       "续作中断的桌宠删除",
-      () => cleanupInterruptedPetDeletions(deleteAiConnection)
+      () => cleanupInterruptedPetDeletions()
     );
     await startupProfiler.measureOnce(
       "avatar-drafts-cleaned",

@@ -1,5 +1,6 @@
-import { ChevronDown, Download, ExternalLink, FileText, RefreshCw, RotateCw, X } from "lucide-react";
+import { CheckCircle2, ChevronDown, Download, ExternalLink, FileText, LoaderCircle, RefreshCw, RotateCw, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { AppUpdateState, AppUpdateActionResult } from "../../../shared/types/appUpdate";
 
 function megabytes(bytes: number): string {
@@ -11,6 +12,8 @@ export function AppUpdateControl({ showButton = true }: { showButton?: boolean }
   const [opened, setOpened] = useState(false);
   const [actionError, setActionError] = useState<string>();
   const [savingIgnore, setSavingIgnore] = useState(false);
+  const [completionNotice, setCompletionNotice] = useState<string>();
+  const shownCompletionRef = useRef<string>();
   const dialogRef = useRef<HTMLDialogElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const visible = opened || state?.prompt === true;
@@ -30,6 +33,20 @@ export function AppUpdateControl({ showButton = true }: { showButton?: boolean }
     api.startupReady();
     return () => { mounted = false; unsubscribe(); };
   }, []);
+
+  useEffect(() => {
+    const version = state?.completedVersion;
+    if (!showButton || !version || shownCompletionRef.current === version) return;
+    shownCompletionRef.current = version;
+    setCompletionNotice(`已更新至 ${version}`);
+    void window.desktopPet?.appUpdate.acknowledgeCompletion().catch(() => undefined);
+  }, [showButton, state?.completedVersion]);
+
+  useEffect(() => {
+    if (!completionNotice) return;
+    const timer = window.setTimeout(() => setCompletionNotice(undefined), 6000);
+    return () => window.clearTimeout(timer);
+  }, [completionNotice]);
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -52,6 +69,12 @@ export function AppUpdateControl({ showButton = true }: { showButton?: boolean }
     if (state?.phase === "installing" || savingIgnore) return;
     setOpened(false);
     setActionError(undefined);
+    // An automatic install must never be left running behind the editor.
+    // Closing the download dialog withdraws consent and cancels the transfer.
+    if (state?.phase === "downloading") {
+      void window.desktopPet?.appUpdate.cancel().then(setState).catch(failAction);
+      return;
+    }
     void window.desktopPet?.appUpdate.dismiss().then(setState).catch(failAction);
   };
   const ignore = (): void => {
@@ -68,14 +91,17 @@ export function AppUpdateControl({ showButton = true }: { showButton?: boolean }
   const installing = phase === "installing";
   const available = phase === "available";
   const downloaded = phase === "downloaded";
-  const canDownload = state?.mode === "installer" && !!state.latestVersion && (available || phase === "error");
-  const title = downloading ? "正在下载更新" : downloaded ? "更新已准备就绪" : installing ? "正在准备重启安装"
+  const canDownload = showButton && state?.mode === "installer" && !!state.latestVersion && (available || phase === "error");
+  const title = downloading ? "正在下载更新" : downloaded ? "安装尚未完成" : installing ? "正在安装中"
     : state?.latestVersion && available ? "发现新版本" : "软件更新";
   const buttonLabel = downloading ? `下载中 ${Math.floor(state?.progress?.percent ?? 0)}%`
-    : downloaded ? "重启更新" : available ? "发现新版" : "检查更新";
+    : installing ? "正在安装" : downloaded ? "重试更新" : available ? "发现新版" : "检查更新";
 
   return (
     <>
+      {showButton && completionNotice ? createPortal(<div className="appUpdateSuccessToast" role="status">
+        <CheckCircle2 size={18} aria-hidden="true" />{completionNotice}
+      </div>, document.body) : null}
       {showButton ? (
         <button ref={triggerRef} className="topbarImportButton appUpdateTrigger" type="button"
           aria-haspopup="dialog" onClick={() => {
@@ -91,7 +117,7 @@ export function AppUpdateControl({ showButton = true }: { showButton?: boolean }
         onCancel={(event) => { event.preventDefault(); close(); }}>
         <div className="appUpdateHeading">
           <span className="appUpdateIcon" aria-hidden="true"><Download size={23} /></span>
-          <button className="iconButton appUpdateClose" type="button" aria-label={downloading ? "后台下载" : "关闭更新窗口"}
+          <button className="iconButton appUpdateClose" type="button" aria-label={downloading ? "取消下载并关闭" : "关闭更新窗口"}
             disabled={installing || savingIgnore} onClick={close}><X size={19} /></button>
         </div>
         <h2 id="app-update-title">{title}</h2>
@@ -111,15 +137,21 @@ export function AppUpdateControl({ showButton = true }: { showButton?: boolean }
             <pre className="appUpdateNotes">{state.releaseNotes?.trim() || "此版本暂未提供更新说明，可前往 GitHub 发布页查看。"}</pre>
           </details>
         ) : null}
-        {available && state?.mode === "installer" ? <p>推荐使用国内下载，完成后可选择重启安装。</p> : null}
-        {downloaded ? <p>更新包已下载并校验完成。请先保存正在编辑的内容，再重启安装。</p> : null}
-        {installing ? <p role="status">正在结束语音、屏幕捕获和后台任务，请稍候…</p> : null}
+        {available && state?.mode === "installer" ? <p>{showButton
+          ? "请先保存正在编辑的内容。确认更新后将下载并自动关闭软件安装，安装完成后自动打开新版。"
+          : "请先保存正在编辑的内容，返回主页后确认更新。"}</p> : null}
+        {downloaded ? <p>更新包已校验，安装准备未完成。可重试安装，或稍后处理。</p> : null}
+        {installing ? <div className="appUpdateInstalling" role="status">
+          <LoaderCircle size={22} className="appUpdateSpinner" aria-hidden="true" />
+          <p>正在停止桌宠、语音和后台任务。软件即将关闭，安装完成后会自动打开新版，请稍候…</p>
+        </div> : null}
         {downloading ? (
           <div className="appUpdateDownload" aria-live="polite">
             <div className="appUpdateProgressLabel"><strong>{state?.downloadSource === "github" ? "正在直连 GitHub 下载" : "正在通过国内 OSS 下载"}</strong><span>{Math.floor(state?.progress?.percent ?? 0)}%</span></div>
             <progress aria-label="更新下载进度" max={100} value={state?.progress?.percent ?? 0} />
             <div className="appUpdateProgressMeta"><span>{megabytes(state?.progress?.transferred ?? 0)} / {state?.progress?.total ? megabytes(state.progress.total) : "获取文件大小中"}</span>
               <span>{megabytes(state?.progress?.bytesPerSecond ?? 0)}/s</span></div>
+            <p>下载完成并校验后会自动安装。下载期间可取消。</p>
           </div>
         ) : null}
         {state?.message ? <p className={phase === "error" ? "appUpdateError" : "appUpdateMessage"} role="status">{state.message}</p> : null}
@@ -132,15 +164,15 @@ export function AppUpdateControl({ showButton = true }: { showButton?: boolean }
           {!downloading && !installing ? <button className="secondaryAction" type="button" disabled={savingIgnore} onClick={close}>
             {available || downloaded ? "稍后" : "关闭"}</button> : null}
           {canDownload ? <button className="primaryAction" type="button" disabled={savingIgnore} onClick={() => runStateAction("download")}>
-            <Download size={16} />国内下载（推荐）</button> : null}
-          {downloaded ? <button className="primaryAction" type="button" onClick={() => {
+            <Download size={16} />确认更新（推荐）</button> : null}
+          {downloaded && showButton ? <button className="primaryAction" type="button" onClick={() => {
             setActionError(undefined);
             void window.desktopPet?.appUpdate.install().then(reportAction).catch(failAction);
-          }}><RotateCw size={16} />重启并安装</button> : null}
+          }}><RotateCw size={16} />重试安装</button> : null}
           {phase === "error" ? <button className={canDownload ? "secondaryAction" : "primaryAction"} type="button" onClick={() => runStateAction("check")}>重新检查</button> : null}
         </div>
         {canDownload ? <button className="appUpdateReleaseLink" type="button" disabled={savingIgnore}
-          onClick={() => runStateAction("downloadGithub")}><Download size={13} />使用 GitHub 下载</button> : null}
+          onClick={() => runStateAction("downloadGithub")}><Download size={13} />通过 GitHub 更新</button> : null}
         {!installing ? <button className="appUpdateReleaseLink" type="button" onClick={() => {
           void window.desktopPet?.appUpdate.openReleasePage().then(reportAction).catch(failAction);
         }}><ExternalLink size={13} />前往 GitHub 发布页</button> : null}
