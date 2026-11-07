@@ -10,6 +10,9 @@ describe("preload capability separation", () => {
     expect(source).toContain('ipcRenderer.invoke("memory:list"');
     expect(source).toContain('ipcRenderer.invoke("memory:get-source-conversation"');
     expect(source).toContain('ipcRenderer.invoke("memory:clear"');
+    expect(source).toContain('ipcRenderer.invoke("memory:prepare-import"');
+    expect(source).toContain('ipcRenderer.invoke("memory:confirm-import"');
+    expect(source).toContain('ipcRenderer.invoke("memory:cancel-import"');
     expect(source).toContain('ipcRenderer.invoke("ai-settings:test-output"');
     expect(source).toContain('ipcRenderer.invoke("pet-package:begin-import"');
     expect(source).toContain('ipcRenderer.invoke("pet-package:list-import-ai-models"');

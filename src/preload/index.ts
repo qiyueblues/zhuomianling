@@ -67,6 +67,7 @@ import type {
   MemorySummary,
   MemoryUpdateRequest
 } from "../shared/types/memory";
+import type { MemoryBackupConfirmRequest, MemoryBackupInspection, MemoryBackupRestoreResult } from "../shared/types/memoryBackup";
 import type { StartupRendererStage } from "../shared/types/startup";
 import type { AppUpdateState, AppUpdateActionResult } from "../shared/types/appUpdate";
 import type { LocalPetMoodSettingsDraft, PetMoodEditorState, PetMoodEnterPreviewRequest, PetMoodVoiceImportRequest, PetMoodVoiceImportResult, PetMoodVoiceRemoveRequest } from "../shared/types/mood";
@@ -341,6 +342,12 @@ const desktopPetApi = {
       >,
     export: (request: MemoryExportRequest) =>
       ipcRenderer.invoke("memory:export", request) as Promise<MemoryResult<MemoryExportSaveResult>>,
+    prepareImport: (petId: string) =>
+      ipcRenderer.invoke("memory:prepare-import", petId) as Promise<MemoryResult<{ canceled: true } | { canceled: false; inspection: MemoryBackupInspection }>>,
+    confirmImport: (request: MemoryBackupConfirmRequest) =>
+      ipcRenderer.invoke("memory:confirm-import", request) as Promise<MemoryResult<MemoryBackupRestoreResult>>,
+    cancelImport: (request: MemoryBackupConfirmRequest) =>
+      ipcRenderer.invoke("memory:cancel-import", request) as Promise<MemoryResult<void>>,
     rebuildIndex: (petId: string) =>
       ipcRenderer.invoke("memory:rebuild-index", petId) as Promise<MemoryResult<MemoryIndexRebuildResult>>,
     getSettings: (petId: string) =>

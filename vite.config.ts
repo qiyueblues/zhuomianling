@@ -49,8 +49,9 @@ export default defineConfig({
     }
   },
   server: {
-    port: 5173,
-    strictPort: true,
+    host: "127.0.0.1",
+    port: 7654,
+    strictPort: false,
     watch: {
       // M9.5 development resources are runtime inputs, not renderer source.
       // Watching their large Python/ONNX/BGE tree starves Vite's first module

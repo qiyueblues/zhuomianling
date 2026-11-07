@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { MemoryRecordInput } from "../../../shared/types/memory";
 import { MemoryLedger, MemoryLedgerError } from "./MemoryLedger";
 import { MemoryPendingStore } from "./MemoryPendingStore";
-import { createMemoryExportFileName, exportMemorySnapshot } from "./memoryExport";
+import { createMemoryExportFileName } from "./memoryExport";
 
 let temporaryDirectory = "";
 
@@ -368,7 +368,8 @@ describe("MemoryLedger mutations and recovery", () => {
       lastAppliedSequence: created.outboxSequence,
       modelFingerprint: "embedding-fixture-v1"
     });
-    expect(ledger.listOutbox()[0]?.processedAt).toBeDefined();
+    expect(ledger.listOutbox()).toEqual([]);
+    expect(ledger.getPendingOutboxCount()).toBe(0);
     ledger.close();
   });
 
@@ -379,6 +380,70 @@ describe("MemoryLedger mutations and recovery", () => {
     connection.close();
     expect(() => ledger.getIndexMetadata()).toThrow(expect.objectContaining({ code: "LEDGER_CORRUPTED" }));
     ledger.close();
+  });
+
+  it("skips unchanged metadata writes but still requires a backup for real changes", async () => {
+    const ledger = await MemoryLedger.open("pet-a", ledgerOptions());
+    try {
+      const first = await createMemory(ledger, "already indexed");
+      const second = await createMemory(ledger, "still pending");
+      await ledger.setIndexState("pet-a", false, "fixture-model");
+      await ledger.markOutboxProcessed("pet-a", first.outboxSequence);
+      await fs.rm(ledger.paths.ledgerBackup);
+      await fs.mkdir(ledger.paths.ledgerBackup);
+
+      await expect(ledger.setIndexState("pet-a", false, "fixture-model")).resolves.toBeUndefined();
+      await expect(ledger.setIndexState("pet-a", false)).resolves.toBeUndefined();
+      await expect(ledger.markOutboxProcessed("pet-a", first.outboxSequence)).resolves.toBeUndefined();
+      await expect(ledger.setIndexState("pet-a", true)).rejects.toMatchObject({ code: "MEMORY_STORAGE_UNAVAILABLE" });
+      await expect(ledger.setIndexState("pet-a", false, "changed-model")).rejects.toMatchObject({ code: "MEMORY_STORAGE_UNAVAILABLE" });
+      await expect(ledger.markOutboxProcessed("pet-a", second.outboxSequence)).rejects.toMatchObject({ code: "MEMORY_STORAGE_UNAVAILABLE" });
+      expect(ledger.getIndexMetadata()).toEqual({ dirty: false, modelFingerprint: "fixture-model", lastAppliedSequence: first.outboxSequence });
+      expect(ledger.getPendingOutboxCount()).toBe(1);
+      await expect(ledger.markOutboxProcessed("pet-a", second.outboxSequence + 1)).rejects.toThrow("exceeds the ledger");
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("repairs pending flags even when the saved cursor has already advanced", async () => {
+    const ledger = await MemoryLedger.open("pet-a", ledgerOptions());
+    try {
+      const created = await createMemory(ledger, "repair pending acknowledgment");
+      await ledger.markOutboxProcessed("pet-a", created.outboxSequence);
+      const connection = new DatabaseSync(ledger.paths.ledger);
+      connection.prepare(`INSERT INTO index_outbox(sequence, operation, memory_id, payload_json, created_at)
+        VALUES (?, 'upsert', ?, ?, ?)`).run(created.outboxSequence, created.memory.id, JSON.stringify(created.memory), created.memory.createdAt);
+      connection.close();
+      expect(ledger.getPendingOutboxCount()).toBe(1);
+      await ledger.markOutboxProcessed("pet-a", created.outboxSequence);
+      expect(ledger.getPendingOutboxCount()).toBe(0);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("queries bounded outbox ranges without parsing historical payloads", async () => {
+    const ledger = await MemoryLedger.open("pet-a", ledgerOptions());
+    try {
+      const first = await createMemory(ledger, "first");
+      const second = await createMemory(ledger, "second");
+      const cleared = await ledger.clear("pet-a");
+      expect(ledger.listOutbox(0, 20, second.outboxSequence).map(({ sequence }) => sequence)).toEqual([
+        first.outboxSequence, second.outboxSequence
+      ]);
+      const connection = new DatabaseSync(ledger.paths.ledger);
+      connection.prepare("UPDATE index_outbox SET payload_json = 'invalid-json'").run();
+      connection.close();
+      expect(ledger.getLatestOutboxSequence()).toBe(cleared.outboxSequence);
+      expect(ledger.hasOutboxClear(0, second.outboxSequence)).toBe(false);
+      expect(ledger.hasOutboxClear(second.outboxSequence, cleared.outboxSequence!)).toBe(true);
+      expect(() => ledger.listOutbox()).toThrow(expect.objectContaining({ code: "LEDGER_CORRUPTED" }));
+      expect(() => ledger.hasOutboxClear(-1, 10)).toThrow("Invalid outbox range");
+      expect(() => ledger.listOutbox(0, 20, Number.POSITIVE_INFINITY)).toThrow("Invalid outbox upper bound");
+    } finally {
+      ledger.close();
+    }
   });
 
   it("physically purges synchronized forgotten content, sources, outbox payloads, WAL, and backup copies", async () => {
@@ -413,6 +478,8 @@ describe("MemoryLedger mutations and recovery", () => {
     expect(ledger.snapshot(true)).toEqual([]);
     expect(ledger.getSourceTurns()).toEqual([]);
     expect(ledger.listOutbox()).toEqual([]);
+    expect(ledger.getLatestOutboxSequence()).toBe(0);
+    await expect(ledger.markOutboxProcessed("pet-a", forgotten.outboxSequence)).resolves.toBeUndefined();
     const ledgerPath = ledger.paths.ledger;
     const backupPath = ledger.paths.ledgerBackup;
     ledger.close();
@@ -461,9 +528,9 @@ describe("pending durability and exports", () => {
   });
 
   it("uses the current pet name for a filesystem-safe export filename", () => {
-    expect(createMemoryExportFileName("若叶睦", "former-name", "md")).toBe("若叶睦-memory.md");
-    expect(createMemoryExportFileName("若叶/睦:*", "pet-a", "json")).toBe("若叶 睦-memory.json");
-    expect(createMemoryExportFileName("CON", "pet-a", "md")).toBe("pet-a-memory.md");
+    expect(createMemoryExportFileName("若叶睦", "former-name")).toBe("若叶睦-memory.zmlmem");
+    expect(createMemoryExportFileName("若叶/睦:*", "pet-a")).toBe("若叶 睦-memory.zmlmem");
+    expect(createMemoryExportFileName("CON", "pet-a")).toBe("pet-a-memory.zmlmem");
   });
 
   it("durably backs up pending turns and restores only on an explicit request", async () => {
@@ -501,7 +568,7 @@ describe("pending durability and exports", () => {
     await expect(store.list()).resolves.toEqual([]);
   });
 
-  it("exports readable Markdown and bounded JSON without internal fields or sources by default", async () => {
+  it("exports an authority snapshot with associated sources only when requested", async () => {
     const ledger = await MemoryLedger.open("pet-a", ledgerOptions());
     await ledger.commitAutomaticTurn(
       {
@@ -524,20 +591,13 @@ describe("pending durability and exports", () => {
         }
       ]
     );
-    const records = ledger.snapshot();
-    const sources = ledger.getSourceTurns();
-    const markdown = exportMemorySnapshot("pet-a", records, sources, { format: "markdown" });
-    const json = exportMemorySnapshot("pet-a", records, sources, { format: "json" });
-    const withSources = exportMemorySnapshot("pet-a", records, sources, {
-      format: "json",
-      includeSources: true
-    });
-
-    expect(markdown.content).toContain("Visible memory");
-    expect(markdown.content).not.toContain("private source");
-    expect(json.content).not.toContain("private source");
-    expect(json.content).not.toMatch(/embedding|outbox|sqlite|[A-Z]:\\/i);
-    expect(withSources.content).toContain("private source");
+    const data = ledger.backupSnapshot(false);
+    const withSources = ledger.backupSnapshot(true);
+    expect(data.records[0]).toMatchObject({ content: "Visible memory", sourceAvailable: false });
+    expect(data.sources).toEqual([]);
+    expect(JSON.stringify(data)).not.toMatch(/private source|embedding|outbox|sqlite|[A-Z]:\\/i);
+    expect(withSources.sources).toMatchObject([{ memoryIds: ["automatic-1"], userText: "private source" }]);
+    expect(withSources.records[0].sourceAvailable).toBe(true);
     ledger.close();
   });
 });

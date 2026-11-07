@@ -288,7 +288,6 @@ export interface MemoryExportRequest {
 
 export interface MemoryExportSaveResult {
   canceled: boolean;
-  format: "markdown" | "json";
   recordCount: number;
   fileName?: string;
   message: string;
@@ -371,14 +370,7 @@ export interface MemoryIndexMetadata {
 }
 
 export interface MemoryExportOptions {
-  format: "markdown" | "json";
   includeSources?: boolean;
-}
-
-export interface MemoryExportResult {
-  format: "markdown" | "json";
-  content: string;
-  recordCount: number;
 }
 
 export interface MemoryPendingTurn {

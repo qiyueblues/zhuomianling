@@ -185,11 +185,11 @@ describe("MemoryManagementService", () => {
     })).resolves.toMatchObject({ ok: true });
     await expect(service.exportSnapshot({
       petId: "pet-a",
-      options: { format: "json", includeSources: true }
+      options: { includeSources: true }
     })).resolves.toMatchObject({ ok: false, error: { code: "invalid-request" } });
     await expect(service.exportSnapshot({
       petId: "pet-a",
-      options: { format: "json", includeSources: true },
+      options: { includeSources: true },
       sourceExportConsent: MEMORY_SOURCE_EXPORT_CONSENT
     })).resolves.toMatchObject({ ok: true });
     await expect(service.clear({ petId: "pet-a", confirmPetId: "pet-b" })).resolves.toMatchObject({
@@ -209,6 +209,27 @@ describe("MemoryManagementService", () => {
     expect(result).toEqual({ ok: true });
     expect(events).toEqual(["close-index", "delete-files"]);
     expect(releaseCapture).toHaveBeenCalledOnce();
+  });
+
+  it("restores a backup with capture suspended and keeps authority when the index is unavailable", async () => {
+    const { service, dependencies, releaseCapture } = fixture({
+      synchronize: vi.fn(async () => { throw new MemoryBackendError("unavailable", "sidecar unavailable"); })
+    });
+    const source = await dependencies.openLedger("pet-a");
+    const created = await source.create(createRequest("pet-a", "backup authority"));
+    const data = source.backupSnapshot(false);
+    source.close();
+    const restored = await service.restoreSnapshot("pet-b", data);
+    expect(restored).toEqual({ ok: true, value: { importedCount: 1, skippedCount: 0, indexState: "pending" } });
+    expect(dependencies.suspendCaptures).toHaveBeenCalledWith("pet-b");
+    expect(releaseCapture).toHaveBeenCalledOnce();
+    const listed = await service.list({ petId: "pet-b", pageSize: 5 });
+    expect(listed.ok && listed.value.items[0]?.content).toBe("backup authority");
+    expect(JSON.stringify(restored)).not.toContain("outbox");
+    expect(await service.get({ petId: "pet-a", memoryId: created.memory.id })).toMatchObject({ ok: true, value: { content: "backup authority" } });
+    const again = await service.restoreSnapshot("pet-b", data);
+    expect(again).toEqual({ ok: true, value: { importedCount: 0, skippedCount: 1, indexState: "pending" } });
+    expect(dependencies.synchronize).toHaveBeenCalledOnce();
   });
 
   it("reports only public status fields and does not create data for an unknown pet", async () => {

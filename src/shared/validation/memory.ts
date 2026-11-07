@@ -307,8 +307,8 @@ export function assertMemorySettingsSaveRequest(value: MemorySettingsSaveRequest
 
 export function assertMemoryExportRequest(value: MemoryExportRequest): void {
   assertValidPetId(value.petId);
-  if (!value.options || (value.options.format !== "markdown" && value.options.format !== "json")) {
-    throw new MemoryValidationError("Invalid memory export format.");
+  if (!isRecord(value.options) || Object.keys(value.options).some((key) => key !== "includeSources")) {
+    throw new MemoryValidationError("Invalid memory backup options.");
   }
   if (value.options.includeSources !== undefined && typeof value.options.includeSources !== "boolean") {
     throw new MemoryValidationError("includeSources must be a boolean.");

@@ -116,11 +116,11 @@ describe("memory DTO validation", () => {
     })).not.toThrow();
     expect(() => assertMemoryExportRequest({
       petId: "pet-a",
-      options: { format: "json", includeSources: true }
+      options: { includeSources: true }
     })).toThrow(MemoryValidationError);
     expect(() => assertMemoryExportRequest({
       petId: "pet-a",
-      options: { format: "json", includeSources: true },
+      options: { includeSources: true },
       sourceExportConsent: MEMORY_SOURCE_EXPORT_CONSENT
     })).not.toThrow();
   });

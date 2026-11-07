@@ -130,9 +130,11 @@ import {
   removeLocalPetMoodVoice
 } from "./services/config/petConfigStore";
 import { moodService } from "./services/mood/MoodService";
-import { writeTextFileAtomically } from "./services/config/durableJsonFile";
 import { memoryManagementService } from "./services/memory/memoryManagement";
 import { createMemoryExportFileName } from "./services/memory/memoryExport";
+import { MemoryBackupSessions } from "./services/memory/MemoryBackupSessions";
+import { toMemoryErrorDto } from "./services/memory/memoryErrors";
+import type { MemoryBackupConfirmRequest } from "../shared/types/memoryBackup";
 import {
   createLive2DPreviewModel,
   generateLive2DEntry,
@@ -161,6 +163,9 @@ import { screenVisionTiming } from "./services/screen/ScreenVisionTiming";
 import { startLocalHelpServer } from "./services/help/localHelpServer";
 
 const localHelpPageFileName = "help.html";
+const memoryBackupSessions = new MemoryBackupSessions();
+const memoryBackupOwners = new WeakSet<Electron.WebContents>();
+const memoryBackupSelecting = new Set<number>();
 
 function getLocalHelpPageRoot(): string {
   if (app.isPackaged) {
@@ -904,14 +909,13 @@ export function registerIpc(ipcMain: IpcMain, getMainWindow: () => BrowserWindow
   handle("memory:export", "main", async (_event, request: MemoryExportRequest) => {
     const prepared = await memoryManagementService.exportSnapshot(request);
     if (!prepared.ok) return prepared;
-    const extension = request.options.format === "json" ? "json" : "md";
     const pet = await getLocalPetDefinition(request.petId);
     const options = {
       title: "导出桌宠记忆",
-      defaultPath: createMemoryExportFileName(pet?.name, request.petId, extension),
+      defaultPath: createMemoryExportFileName(pet?.name, request.petId),
       filters: [{
-        name: request.options.format === "json" ? "JSON" : "Markdown",
-        extensions: [extension]
+        name: "桌面灵记忆备份",
+        extensions: ["zmlmem"]
       }]
     };
     const mainWindow = getMainWindow();
@@ -923,34 +927,83 @@ export function registerIpc(ipcMain: IpcMain, getMainWindow: () => BrowserWindow
         ok: true as const,
         value: {
           canceled: true,
-          format: prepared.value.format,
-          recordCount: prepared.value.recordCount,
+          recordCount: prepared.value.records.length,
           message: "已取消导出。"
         }
       };
     }
     try {
-      await writeTextFileAtomically(selection.filePath, prepared.value.content);
+      const { writeMemoryBackup } = await import("./services/memory/memoryBackupArchive");
+      await writeMemoryBackup(selection.filePath, prepared.value, pet?.name ?? request.petId);
       return {
         ok: true as const,
         value: {
           canceled: false,
-          format: prepared.value.format,
-          recordCount: prepared.value.recordCount,
+          recordCount: prepared.value.records.length,
           fileName: path.basename(selection.filePath),
           message: "记忆已导出。"
         }
       };
-    } catch {
+    } catch (error) {
       return {
         ok: false as const,
-        error: {
+        error: error instanceof Error && "code" in error && error.code === "invalid-request" ? toMemoryErrorDto(error) : {
           code: "storage-unavailable" as const,
           message: "无法写入所选导出文件。",
           retryable: true
         }
       };
     }
+  });
+
+  handle("memory:prepare-import", "main", async (event, petId: string) => {
+    const owner = event.sender.id;
+    if (memoryBackupSelecting.has(owner)) {
+      return { ok: false as const, error: { code: "conflict" as const, message: "正在校验记忆备份，请稍候。", retryable: false } };
+    }
+    memoryBackupSelecting.add(owner);
+    memoryBackupSessions.discardOwner(owner);
+    try {
+      if (!await getLocalPetDefinition(petId)) {
+        return { ok: false as const, error: { code: "not-found" as const, message: "当前桌宠不存在。", retryable: false } };
+      }
+      if (!memoryBackupOwners.has(event.sender)) {
+        memoryBackupOwners.add(event.sender);
+        event.sender.once("destroyed", () => memoryBackupSessions.discardOwner(owner));
+        event.sender.on("render-process-gone", () => memoryBackupSessions.discardOwner(owner));
+      }
+      const options: OpenDialogOptions = {
+        title: "导入记忆备份", properties: ["openFile"],
+        filters: [{ name: "桌面灵记忆备份", extensions: ["zmlmem"] }]
+      };
+      const window = getMainWindow();
+      const selection = window ? await dialog.showOpenDialog(window, options) : await dialog.showOpenDialog(options);
+      if (selection.canceled || !selection.filePaths[0]) return { ok: true as const, value: { canceled: true as const } };
+      const { readMemoryBackup } = await import("./services/memory/memoryBackupArchive");
+      const backup = await readMemoryBackup(selection.filePaths[0]);
+      if (event.sender.isDestroyed()) return { ok: true as const, value: { canceled: true as const } };
+      return { ok: true as const, value: { canceled: false as const, inspection: memoryBackupSessions.prepare(owner, petId, selection.filePaths[0], backup) } };
+    } catch (error) {
+      return { ok: false as const, error: toMemoryErrorDto(error) };
+    } finally {
+      memoryBackupSelecting.delete(owner);
+    }
+  });
+
+  handle("memory:confirm-import", "main", async (event, request: MemoryBackupConfirmRequest) => {
+    try {
+      const data = memoryBackupSessions.take(event.sender.id, request.petId, request.token);
+      return await memoryManagementService.restoreSnapshot(request.petId, data);
+    } catch (error) {
+      return { ok: false as const, error: toMemoryErrorDto(error) };
+    }
+  });
+
+  handle("memory:cancel-import", "main", (event, request: MemoryBackupConfirmRequest) => {
+    try {
+      memoryBackupSessions.take(event.sender.id, request.petId, request.token);
+    } catch { /* An expired or already-consumed confirmation is already canceled. */ }
+    return { ok: true as const, value: undefined };
   });
 
   handle("memory:rebuild-index", "main", (_event, petId: string) =>

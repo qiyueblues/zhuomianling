@@ -2,7 +2,6 @@ import type {
   MemoryClearRequest,
   MemoryCreateRequest,
   MemoryExportRequest,
-  MemoryExportResult,
   MemoryGetRequest,
   MemoryIndexRebuildResult,
   MemoryListRequest,
@@ -45,7 +44,8 @@ import {
   saveLocalPetMemorySettings
 } from "../config/petConfigStore";
 import { MemoryBackendError } from "./MemoryBackend";
-import { exportMemorySnapshot } from "./memoryExport";
+import type { MemoryBackupData, MemoryBackupRestoreResult } from "../../../shared/types/memoryBackup";
+import { assertMemoryBackupData } from "../../../shared/validation/memoryBackup";
 import { toMemoryErrorDto } from "./memoryErrors";
 import { MemoryLedger } from "./MemoryLedger";
 import { MemoryPendingStore } from "./MemoryPendingStore";
@@ -257,15 +257,33 @@ export class MemoryManagementService {
     }));
   }
 
-  exportSnapshot(request: MemoryExportRequest): Promise<MemoryResult<MemoryExportResult>> {
+  exportSnapshot(request: MemoryExportRequest): Promise<MemoryResult<MemoryBackupData>> {
     try {
       assertMemoryExportRequest(request);
     } catch (error) {
       return Promise.resolve({ ok: false, error: toMemoryErrorDto(error) });
     }
     return this.execute(request.petId, (petId) => this.withLedger(petId, (ledger) =>
-      exportMemorySnapshot(petId, ledger.snapshot(), ledger.getSourceTurns(), request.options)
+      ledger.backupSnapshot(request.options.includeSources === true)
     ), false);
+  }
+
+  restoreSnapshot(petId: string, data: MemoryBackupData): Promise<MemoryResult<MemoryBackupRestoreResult>> {
+    return this.execute(petId, async (validPetId) => {
+      assertMemoryBackupData(data);
+      const release = await this.dependencies.suspendCaptures(validPetId);
+      try {
+        return await this.withLedger(validPetId, async (ledger) => {
+          const mutation = await ledger.restoreSnapshot(data);
+          if (!mutation.importedCount) {
+            return { ...mutation, indexState: ledger.getIndexMetadata().dirty || ledger.getPendingOutboxCount() > 0 ? "pending" as const : "synced" as const };
+          }
+          return this.synchronizeMutation(ledger, mutation);
+        });
+      } finally {
+        release();
+      }
+    });
   }
 
   rebuildIndex(petId: string): Promise<MemoryResult<MemoryIndexRebuildResult>> {

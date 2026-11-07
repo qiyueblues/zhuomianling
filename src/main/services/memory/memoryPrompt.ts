@@ -2,7 +2,8 @@ import type { AiChatMessage } from "../../../shared/types/ai";
 import type {
   MemoryRecallAnswerPolicy,
   MemoryRecallItem,
-  MemorySettings
+  MemorySettings,
+  MemorySourceConversation
 } from "../../../shared/types/memory";
 
 const maximumInjectedItems = 6;
@@ -33,8 +34,12 @@ export function buildMemoryRecallQuery(messages: AiChatMessage[]): string | unde
   return `${prefix}${current}`.slice(-2_048);
 }
 
-function rankedItems(items: MemoryRecallItem[], settings: MemorySettings): MemoryRecallItem[] {
-  const unique = new Map<string, MemoryRecallItem>();
+export interface MemoryRecallContextItem extends MemoryRecallItem {
+  source?: MemorySourceConversation;
+}
+
+export function selectMemoryRecallItems<T extends MemoryRecallItem>(items: T[], settings: MemorySettings): T[] {
+  const unique = new Map<string, T>();
   for (const item of items) {
     if (item.memory.deletedAt || item.score < minimumRecallScore || unique.has(item.memory.id)) continue;
     unique.set(item.memory.id, item);
@@ -79,60 +84,111 @@ interface PromptMemoryEntry {
   content: string;
   important: boolean;
   origin: string;
+  edited?: true;
+  sourceConversationId?: string;
 }
 
-function serializeContext(entries: PromptMemoryEntry[], answerPolicy: MemoryRecallAnswerPolicy): string {
+interface PromptSourceConversation {
+  id: string;
+  occurredAt: string;
+  messages: { role: "user" | "assistant"; content: string }[];
+}
+
+const sourceContextNote = "来源对话按 role 区分说话者与人称：user 为用户原话，assistant 为桌宠当时的回复（不代表用户事实）；已编辑记忆优先于旧原文，来源仅补充语境。\n";
+
+function serializeContext(
+  entries: PromptMemoryEntry[],
+  answerPolicy: MemoryRecallAnswerPolicy,
+  sources: PromptSourceConversation[] = []
+): string {
   const header = answerPolicy === "verified" ? verifiedContextHeader : contextHeader;
+  if (sources.length) {
+    return `${header}${sourceContextNote}${JSON.stringify({ memories: entries, sourceConversations: sources })}`;
+  }
   return `${header}${JSON.stringify(entries)}`;
 }
 
+function fitSummary(
+  entry: PromptMemoryEntry,
+  fits: (candidate: PromptMemoryEntry) => boolean
+): PromptMemoryEntry | undefined {
+  let low = 0;
+  let high = entry.content.length;
+  let fitted: PromptMemoryEntry | undefined;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const candidate = { ...entry, content: `${entry.content.slice(0, middle)}…` };
+    if (fits(candidate)) {
+      fitted = candidate;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return fitted;
+}
+
 export function buildUntrustedMemoryContext(
-  items: MemoryRecallItem[],
+  items: MemoryRecallContextItem[],
   settings: MemorySettings,
   answerPolicy: MemoryRecallAnswerPolicy = "reference"
 ): { context?: string; includedCount: number } {
   if (answerPolicy === "unknown") {
     return { context: unknownVerificationContext, includedCount: 0 };
   }
-  const selected = rankedItems(items, settings);
+  const selected = selectMemoryRecallItems(items, settings);
   const entries: PromptMemoryEntry[] = [];
+  const sources: PromptSourceConversation[] = [];
+  const sourceIds = new Map<string, string>();
   for (const item of selected) {
     const entry: PromptMemoryEntry = {
       chapter: item.memory.chapter,
       type: item.memory.memoryType,
       content: item.memory.content,
       important: item.memory.important,
-      origin: item.memory.origin
+      origin: item.memory.origin,
+      ...(item.memory.revision > 1 ? { edited: true as const } : {})
     };
-    if (serializeContext([...entries, entry], answerPolicy).length <= settings.contextBudgetChars) {
+    if (item.memory.sourceAvailable && item.source) {
+      const source = item.source;
+      const key = JSON.stringify([source.occurredAt, source.userText, source.assistantReply]);
+      const existingId = sourceIds.get(key);
+      const id = existingId ?? `source-${sources.length + 1}`;
+      const nextSources = existingId ? sources : [...sources, {
+        id,
+        occurredAt: source.occurredAt,
+        messages: [
+          { role: "user" as const, content: source.userText },
+          { role: "assistant" as const, content: source.assistantReply }
+        ]
+      }];
+      const withSource = { ...entry, sourceConversationId: id };
+      const fits = (candidate: PromptMemoryEntry) =>
+        serializeContext([...entries, candidate], answerPolicy, nextSources).length <= settings.contextBudgetChars;
+      // Preserve whole turns. Only an unedited first summary may yield space to its source.
+      const fitted = fits(withSource) ? withSource : !entries.length && !entry.edited
+        ? fitSummary(withSource, fits) : undefined;
+      if (fitted) {
+        entries.push(fitted);
+        if (!existingId) {
+          sources.push(nextSources[nextSources.length - 1]);
+          sourceIds.set(key, id);
+        }
+        continue;
+      }
+    }
+    if (serializeContext([...entries, entry], answerPolicy, sources).length <= settings.contextBudgetChars) {
       entries.push(entry);
       continue;
     }
     if (entries.length) break;
 
-    const originalContent = entry.content;
-    let low = 0;
-    let high = originalContent.length;
-    let fitted = "";
-    while (low <= high) {
-      const middle = Math.floor((low + high) / 2);
-      const candidate = middle < originalContent.length
-        ? `${originalContent.slice(0, middle)}…`
-        : originalContent;
-      if (serializeContext([{ ...entry, content: candidate }], answerPolicy).length <= settings.contextBudgetChars) {
-        fitted = candidate;
-        low = middle + 1;
-      } else {
-        high = middle - 1;
-      }
-    }
-    if (fitted) {
-      entry.content = fitted;
-      entries.push(entry);
-    }
+    const fitted = fitSummary(entry, (candidate) =>
+      serializeContext([candidate], answerPolicy, sources).length <= settings.contextBudgetChars);
+    if (fitted) entries.push(fitted);
     break;
   }
-  const context = entries.length ? serializeContext(entries, answerPolicy) : undefined;
+  const context = entries.length ? serializeContext(entries, answerPolicy, sources) : undefined;
   return { context, includedCount: entries.length };
 }
 

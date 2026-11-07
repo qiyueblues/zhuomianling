@@ -136,6 +136,8 @@ npm.cmd install
 npm.cmd run dev
 ```
 
+也可双击 `启动桌宠选择器.cmd`。开发服务器默认使用本机 `127.0.0.1:7654`；端口被占用时会依次尝试 7655、7656 等端口，并让 Electron 连接实际启动的地址。普通启动与 `npm.cmd run dev:timed` 共用此逻辑。
+
 类型检查和构建：
 
 ```powershell

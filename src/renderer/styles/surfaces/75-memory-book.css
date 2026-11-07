@@ -694,11 +694,11 @@
 
 .memoryExportPanel > p { margin: 0; color: var(--ui-muted); line-height: 1.55; }
 .memoryConsentNotice { display: flex; gap: 9px; padding: 11px; border-radius: 12px; color: var(--ui-warning); background: color-mix(in srgb, var(--ui-warning) 9%, transparent); }
-.memoryExportChoices { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-.memoryExportChoices button { display: flex; min-height: 82px; align-items: center; gap: 13px; padding: 14px; border: 1px solid var(--ui-line-strong); border-radius: 14px; color: var(--ui-ink); text-align: left; background: var(--ui-glass); }
-.memoryExportChoices button:hover { border-color: var(--ui-accent); }
-.memoryExportChoices span { display: grid; gap: 3px; }
-.memoryExportChoices small { color: var(--ui-muted); }
+.memoryBackupVerified { display: flex; align-items: center; gap: 8px; color: var(--ui-accent-ink); }
+.memoryBackupDetails { display: grid; gap: 12px; margin: 0; }
+.memoryBackupDetails div { display: grid; grid-template-columns: 80px minmax(0, 1fr); gap: 12px; }
+.memoryBackupDetails dt { color: var(--ui-muted); }
+.memoryBackupDetails dd { margin: 0; overflow-wrap: anywhere; }
 
 .memoryDetail > p { margin: 0; white-space: pre-wrap; line-height: 1.75; overflow-wrap: anywhere; }
 .memoryDetail dl { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 0; }
@@ -937,7 +937,7 @@
   .memorySpread .memoryPaperPage:nth-child(2) { display: block; }
   .memoryInlineError, .memoryProviderNotice { align-items: start; flex-wrap: wrap; }
   .memoryInlineError button, .memoryProviderNotice button { margin-left: 30px; }
-  .memorySettingsGrid, .memoryExportChoices, .memoryDetail dl, .memorySourceMeta, .memoryRetentionConsentPoints { grid-template-columns: 1fr; }
+  .memorySettingsGrid, .memoryDetail dl, .memorySourceMeta, .memoryRetentionConsentPoints { grid-template-columns: 1fr; }
   .memorySourceTurns { padding-inline: 2px; }
   .memorySourceTurn { max-width: 91%; }
   .memoryDialogOverlay { padding: 10px; }

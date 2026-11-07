@@ -1,5 +1,6 @@
 import { assertValidPetId } from "../shared/validation/petId";
 import { MEMORY_LIMITS } from "../shared/types/memory";
+import { assertMemoryBackupConfirmRequest } from "../shared/validation/memoryBackup";
 import {
   petChatDecorationIcons,
   petChatDecorationSlots,
@@ -171,6 +172,9 @@ export const validatedIpcChannels = new Set([
   "memory:undo-forget",
   "memory:clear",
   "memory:export",
+  "memory:prepare-import",
+  "memory:confirm-import",
+  "memory:cancel-import",
   "memory:rebuild-index",
   "memory:get-settings",
   "memory:save-settings",
@@ -1187,6 +1191,7 @@ export function validateIpcArguments(channel: string, args: unknown[]): void {
 
   if (
     channel === "memory:get-summary" ||
+    channel === "memory:prepare-import" ||
     channel === "memory:rebuild-index" ||
     channel === "memory:get-settings" ||
     channel === "memory:get-provider-status" ||
@@ -1287,7 +1292,13 @@ export function validateIpcArguments(channel: string, args: unknown[]): void {
       assertMemoryExportRequest
     );
     const options = assertRecord(channel, request.options, "options");
-    assertAllowedKeys(channel, options, ["format", "includeSources"]);
+    assertAllowedKeys(channel, options, ["includeSources"]);
+    return;
+  }
+
+  if (channel === "memory:confirm-import" || channel === "memory:cancel-import") {
+    expectArgumentCount(channel, args, 1);
+    validateMemoryObject(channel, args[0], ["petId", "token"], assertMemoryBackupConfirmRequest);
     return;
   }
 

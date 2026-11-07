@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { MemoryOutboxEntry, MemoryRecord } from "../../../shared/types/memory";
+import { MEMORY_LIMITS, type MemoryRecord } from "../../../shared/types/memory";
 import { assertMemoryRecord } from "../../../shared/validation/memory";
 import { assertValidPetId } from "../../../shared/validation/petId";
 import { MemoryBackendError, type MemoryBackend } from "./MemoryBackend";
@@ -126,21 +126,13 @@ export class MemoryIndexCoordinator {
     await this.removeChild(root, backup);
   }
 
-  private async purgeSynchronizedForgotten(ledger: MemoryLedger): Promise<void> {
+  private async cleanupSynchronizedLedger(ledger: MemoryLedger): Promise<void> {
     const retention = this.options.forgottenRetentionMs ?? 7_000;
     const cutoff = new Date((this.options.now?.() ?? Date.now()) - retention).toISOString();
     await ledger.purgeDeleted(ledger.petId, cutoff).catch(() => undefined);
-  }
-
-  private outboxAfter(ledger: MemoryLedger, afterSequence: number): MemoryOutboxEntry[] {
-    const result: MemoryOutboxEntry[] = [];
-    let cursor = afterSequence;
-    while (true) {
-      const page = ledger.listOutbox(cursor, 20);
-      result.push(...page);
-      if (page.length < 20) return result;
-      cursor = page[page.length - 1].sequence;
-    }
+    // Maintenance can retry on the next sync without invalidating an already
+    // confirmed index or rolling back committed authority records.
+    await ledger.pruneProcessedOutbox(ledger.petId).catch(() => undefined);
   }
 
   async synchronize(ledger: MemoryLedger, signal: AbortSignal): Promise<MemoryIndexSyncResult> {
@@ -163,38 +155,50 @@ export class MemoryIndexCoordinator {
       return { rebuilt: true, appliedCount };
     }
 
-    const entries = this.outboxAfter(ledger, metadata.lastAppliedSequence);
-    if (!entries.length) {
+    // Capture a finite range before any sidecar work. Later writes remain pending
+    // for the next synchronization, and a clear anywhere in this range wins.
+    const throughSequence = ledger.getLatestOutboxSequence();
+    if (throughSequence <= metadata.lastAppliedSequence) {
       await this.removeObsoleteBackup(root);
-      await this.purgeSynchronizedForgotten(ledger);
+      await this.cleanupSynchronizedLedger(ledger);
       return { rebuilt: false, appliedCount: 0 };
     }
-    if (entries.some((entry) => entry.operation === "clear")) {
+    if (ledger.hasOutboxClear(metadata.lastAppliedSequence, throughSequence)) {
       const appliedCount = await this.rebuildPet(ledger, signal, root, true);
       return { rebuilt: true, appliedCount };
     }
 
     let appliedCount = 0;
+    let cursor = metadata.lastAppliedSequence;
     try {
-      for (const entry of entries) {
+      while (cursor < throughSequence) {
         throwIfAborted(signal);
-        if (entry.operation === "upsert") {
-          assertMemoryRecord(entry.payload as MemoryRecord);
-          const memory = entry.payload as MemoryRecord;
-          if (memory.petId !== ledger.petId || memory.deletedAt) {
-            throw new MemoryBackendError("index-dirty", "Memory outbox upsert is inconsistent.", false);
+        const entries = ledger.listOutbox(cursor, MEMORY_LIMITS.pageSizeDefault, throughSequence);
+        if (!entries.length) break;
+        for (const entry of entries) {
+          throwIfAborted(signal);
+          if (entry.operation === "upsert") {
+            assertMemoryRecord(entry.payload as MemoryRecord);
+            const memory = entry.payload as MemoryRecord;
+            if (memory.petId !== ledger.petId || memory.deletedAt) {
+              throw new MemoryBackendError("index-dirty", "Memory outbox upsert is inconsistent.", false);
+            }
+            await this.options.backend.upsert({ petId: ledger.petId, memory }, signal);
+          } else if (entry.operation === "forget" && entry.memoryId) {
+            await this.options.backend.forget({ petId: ledger.petId, memoryId: entry.memoryId }, signal);
+          } else {
+            throw new MemoryBackendError("index-dirty", "Memory outbox operation is invalid.", false);
           }
-          await this.options.backend.upsert({ petId: ledger.petId, memory }, signal);
-        } else if (entry.operation === "forget" && entry.memoryId) {
-          await this.options.backend.forget({ petId: ledger.petId, memoryId: entry.memoryId }, signal);
-        } else {
-          throw new MemoryBackendError("index-dirty", "Memory outbox operation is invalid.", false);
         }
-        await ledger.markOutboxProcessed(ledger.petId, entry.sequence);
-        appliedCount += 1;
+        throwIfAborted(signal);
+        // Only a completely applied page can advance the durable cursor. A failed
+        // page is replayable; real mutations still take a verified ledger backup.
+        cursor = entries[entries.length - 1].sequence;
+        await ledger.markOutboxProcessed(ledger.petId, cursor);
+        appliedCount += entries.length;
       }
       await this.removeObsoleteBackup(root);
-      await this.purgeSynchronizedForgotten(ledger);
+      await this.cleanupSynchronizedLedger(ledger);
       return { rebuilt: false, appliedCount };
     } catch (error) {
       await ledger.setIndexState(ledger.petId, true, this.options.modelFingerprint).catch(() => undefined);
@@ -228,8 +232,7 @@ export class MemoryIndexCoordinator {
     // These synchronous ledger reads run in one JavaScript turn, so the sequence
     // cursor describes exactly the authority snapshot sent to the sidecar.
     const records = ledger.snapshot(false);
-    const pendingOutbox = this.outboxAfter(ledger, 0);
-    const throughSequence = pendingOutbox.at(-1)?.sequence ?? 0;
+    const throughSequence = ledger.getLatestOutboxSequence();
     await this.removeChild(root, staging);
     await fs.mkdir(staging);
 
@@ -268,8 +271,9 @@ export class MemoryIndexCoordinator {
       await this.removeObsoleteBackup(root);
       if (purgeAllDeleted) {
         await ledger.purgeDeleted(petId, "9999-12-31T23:59:59.999Z");
+        await ledger.pruneProcessedOutbox(petId).catch(() => undefined);
       } else {
-        await this.purgeSynchronizedForgotten(ledger);
+        await this.cleanupSynchronizedLedger(ledger);
       }
       return records.length;
     } catch (error) {

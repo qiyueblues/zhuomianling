@@ -3,6 +3,18 @@ import { describe, expect, it } from "vitest";
 import { validateIpcArguments, validatedIpcChannels } from "./ipcValidation";
 
 describe("validateIpcArguments", () => {
+  it("accepts only a target pet and an opaque confirmation for memory import", () => {
+    expect(() => validateIpcArguments("memory:prepare-import", ["pet-a"])).not.toThrow();
+    expect(() => validateIpcArguments("memory:prepare-import", ["pet-a", "C:/arbitrary.zmlmem"])).toThrow();
+    for (const channel of ["memory:confirm-import", "memory:cancel-import"]) {
+      const request = { petId: "pet-a", token: "12345678-1234-1234-1234-123456789abc" };
+      expect(() => validateIpcArguments(channel, [request])).not.toThrow();
+      expect(() => validateIpcArguments(channel, [{ ...request, path: "C:/arbitrary.zmlmem" }])).toThrow();
+      expect(() => validateIpcArguments(channel, [{ ...request, token: "not-a-token" }])).toThrow();
+      expect(() => validateIpcArguments(channel, [{ ...request, records: [] }])).toThrow();
+    }
+    expect(() => validateIpcArguments("memory:export", [{ petId: "pet-a", options: { format: "json" } }])).toThrow();
+  });
   it("accepts updater commands only without renderer-supplied URLs, paths or versions", () => {
     for (const channel of [
       "app-update:get-state", "app-update:acknowledge-completion", "app-update:check", "app-update:download", "app-update:download-github", "app-update:cancel",
@@ -663,7 +675,7 @@ describe("validateIpcArguments", () => {
   it("keeps every IPC registration covered by a validation schema", async () => {
     const ipcSource = await fs.readFile(new URL("./ipc.ts", import.meta.url), "utf8");
     const registeredChannels = Array.from(
-      ipcSource.matchAll(/\b(?:handle|on)\("([^"]+)"/g),
+      ipcSource.matchAll(/(?<![.\w])(?:handle|on)\("([^"]+)"/g),
       (match) => match[1]
     );
 

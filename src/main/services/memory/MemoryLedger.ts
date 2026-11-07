@@ -21,6 +21,8 @@ import type {
   MemoryUpdateRequest
 } from "../../../shared/types/memory";
 import { MEMORY_CHAPTERS, MEMORY_LIMITS } from "../../../shared/types/memory";
+import { MEMORY_BACKUP_LIMITS, type MemoryBackupData, type MemoryBackupSource } from "../../../shared/types/memoryBackup";
+import { assertMemoryBackupData } from "../../../shared/validation/memoryBackup";
 import {
   assertBoundedMemoryString,
   assertMemoryChapter,
@@ -42,6 +44,7 @@ import {
 } from "./memoryPaths";
 
 const MEMORY_LEDGER_SCHEMA_VERSION = 1;
+const OUTBOX_COMPACTION_MIN_FREE_BYTES = 1024 * 1024;
 
 export type MemoryLedgerErrorCode =
   | "LEDGER_CORRUPTED"
@@ -925,13 +928,38 @@ export class MemoryLedger {
     return rows.map(rowToRecord);
   }
 
-  listOutbox(afterSequence = 0, limit = MEMORY_LIMITS.pageSizeDefault): MemoryOutboxEntry[] {
+  getLatestOutboxSequence(): number {
     this.assertOpen();
-    if (!Number.isInteger(afterSequence) || afterSequence < 0) throw new MemoryValidationError("Invalid outbox cursor.");
+    return Number(
+      (this.database.prepare("SELECT coalesce(max(sequence), 0) maximum FROM index_outbox").get() as { maximum: number }).maximum
+    );
+  }
+
+  hasOutboxClear(afterSequence: number, throughSequence: number): boolean {
+    this.assertOpen();
+    if (
+      !Number.isSafeInteger(afterSequence) || afterSequence < 0 ||
+      !Number.isSafeInteger(throughSequence) || throughSequence < 0
+    ) {
+      throw new MemoryValidationError("Invalid outbox range.");
+    }
+    return this.database
+      .prepare("SELECT 1 FROM index_outbox WHERE sequence > ? AND sequence <= ? AND operation = 'clear' LIMIT 1")
+      .get(afterSequence, throughSequence) !== undefined;
+  }
+
+  listOutbox(
+    afterSequence = 0,
+    limit = MEMORY_LIMITS.pageSizeDefault,
+    throughSequence = Number.MAX_SAFE_INTEGER
+  ): MemoryOutboxEntry[] {
+    this.assertOpen();
+    if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) throw new MemoryValidationError("Invalid outbox cursor.");
+    if (!Number.isSafeInteger(throughSequence) || throughSequence < 0) throw new MemoryValidationError("Invalid outbox upper bound.");
     if (!Number.isInteger(limit) || limit < 1 || limit > MEMORY_LIMITS.pageSizeMax) throw new MemoryValidationError("Invalid outbox limit.");
     const rows = this.database
-      .prepare("SELECT * FROM index_outbox WHERE sequence > ? ORDER BY sequence ASC LIMIT ?")
-      .all(afterSequence, limit) as unknown as OutboxRow[];
+      .prepare("SELECT * FROM index_outbox WHERE sequence > ? AND sequence <= ? ORDER BY sequence ASC LIMIT ?")
+      .all(afterSequence, throughSequence, limit) as unknown as OutboxRow[];
     return rows.map((row) => ({
       sequence: Number(row.sequence),
       operation: row.operation,
@@ -974,25 +1002,74 @@ export class MemoryLedger {
     return Number(row.count);
   }
 
+  private shouldCompactOutbox(): boolean {
+    const { freelist_count: freePages } = this.database.prepare("PRAGMA freelist_count").get() as { freelist_count: number };
+    const { page_count: totalPages } = this.database.prepare("PRAGMA page_count").get() as { page_count: number };
+    const { page_size: pageSize } = this.database.prepare("PRAGMA page_size").get() as { page_size: number };
+    return freePages * pageSize >= OUTBOX_COMPACTION_MIN_FREE_BYTES && freePages * 4 >= totalPages;
+  }
+
+  async pruneProcessedOutbox(petId: string): Promise<{ prunedCount: number; compacted: boolean }> {
+    if (assertValidPetId(petId) !== this.petId) throw new MemoryValidationError("Memory pet ID mismatch.");
+    return withPetConfigWriteLock(this.petId, async () => {
+      this.assertOpen();
+      try {
+        const { lastAppliedSequence } = this.getIndexMetadata();
+        // Old versions retained acknowledged payloads. Never infer completion
+        // from the cursor alone: pending rows must remain available for repair.
+        const completed = this.database
+          .prepare("SELECT 1 FROM index_outbox WHERE processed_at IS NOT NULL AND sequence <= ? LIMIT 1")
+          .get(lastAppliedSequence);
+        if (!completed && !this.shouldCompactOutbox()) return { prunedCount: 0, compacted: false };
+
+        await this.backupBeforeMutation();
+        const prunedCount = completed
+          ? this.transaction(() => Number(this.database
+            .prepare("DELETE FROM index_outbox WHERE processed_at IS NOT NULL AND sequence <= ?")
+            .run(lastAppliedSequence).changes))
+          : 0;
+        // Small deletions reuse free pages. Reclaim disk space only after at
+        // least 1 MiB and a quarter of the database have become unused.
+        const compacted = this.shouldCompactOutbox();
+        if (compacted) this.database.exec("VACUUM");
+        this.database.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get();
+        // The authority did not change; keep a verified recovery copy without
+        // the obsolete payloads or the old database's unused pages.
+        await this.createBackup();
+        return { prunedCount, compacted };
+      } catch (error) {
+        throw sqliteError(error, "MEMORY_STORAGE_UNAVAILABLE");
+      }
+    });
+  }
+
   async markOutboxProcessed(petId: string, throughSequence: number): Promise<void> {
     if (assertValidPetId(petId) !== this.petId) throw new MemoryValidationError("Memory pet ID mismatch.");
-    if (!Number.isInteger(throughSequence) || throughSequence < 0) {
+    if (!Number.isSafeInteger(throughSequence) || throughSequence < 0) {
       throw new MemoryValidationError("Invalid outbox sequence.");
     }
-    const maximum = Number(
-      (this.database.prepare("SELECT coalesce(max(sequence), 0) maximum FROM index_outbox").get() as { maximum: number }).maximum
-    );
-    if (throughSequence > maximum) throw new MemoryValidationError("Outbox sequence exceeds the ledger.");
     await withPetConfigWriteLock(this.petId, async () => {
+      this.assertOpen();
+      const metadata = this.getIndexMetadata();
+      // Acknowledged rows are removed, but the saved cursor and SQLite's
+      // AUTOINCREMENT high-water mark must survive cleanup and reopening.
+      const maximum = Math.max(this.getLatestOutboxSequence(), metadata.lastAppliedSequence);
+      if (throughSequence > maximum) throw new MemoryValidationError("Outbox sequence exceeds the ledger.");
+      const entries = this.database
+        .prepare("SELECT 1 FROM index_outbox WHERE sequence <= ? LIMIT 1")
+        .get(throughSequence);
+      if (throughSequence <= metadata.lastAppliedSequence && !entries) return;
       await this.backupBeforeMutation();
       this.transaction(() => {
+        // The sidecar has confirmed this entire range. Drop its payloads in
+        // the same transaction as the cursor, keeping later work untouched.
         this.database
-          .prepare("UPDATE index_outbox SET processed_at = ? WHERE sequence <= ? AND processed_at IS NULL")
-          .run(this.now(), throughSequence);
+          .prepare("DELETE FROM index_outbox WHERE sequence <= ?")
+          .run(throughSequence);
         this.database
           .prepare(`INSERT INTO index_metadata(key, value) VALUES ('last_applied_sequence', ?)
             ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
-          .run(String(Math.max(throughSequence, this.getIndexMetadata().lastAppliedSequence)));
+          .run(String(Math.max(throughSequence, metadata.lastAppliedSequence)));
       });
     });
   }
@@ -1007,6 +1084,11 @@ export class MemoryLedger {
       assertBoundedMemoryString(modelFingerprint, "modelFingerprint", 256);
     }
     await withPetConfigWriteLock(this.petId, async () => {
+      const metadata = this.getIndexMetadata();
+      if (
+        metadata.dirty === dirty &&
+        (modelFingerprint === undefined || metadata.modelFingerprint === modelFingerprint)
+      ) return;
       await this.backupBeforeMutation();
       this.transaction(() => {
         this.database
@@ -1019,6 +1101,111 @@ export class MemoryLedger {
               ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
             .run(modelFingerprint);
         }
+      });
+    });
+  }
+
+  backupSnapshot(includeSources: boolean): MemoryBackupData {
+    this.assertOpen();
+    if (this.getSummary().total > MEMORY_BACKUP_LIMITS.records) {
+      throw new MemoryValidationError("记忆数量超过单次备份的 10000 条限制。");
+    }
+    const records = this.snapshot();
+    const sources = new Map<string, MemoryBackupSource>();
+    const linkedIds = new Set<string>();
+    if (includeSources) {
+      const rows = this.database.prepare(`
+        SELECT s.request_id id, s.user_text userText, s.assistant_reply assistantReply,
+          s.occurred_at occurredAt, s.created_at organizedAt, m.id memoryId
+        FROM source_turns s JOIN idempotency i ON i.request_id = s.request_id AND i.pet_id = s.pet_id
+        JOIN json_each(i.memory_ids_json) ids
+        JOIN memories m ON m.id = ids.value AND m.pet_id = s.pet_id
+        WHERE s.pet_id = ? AND m.deleted_at IS NULL AND m.source_available = 1
+        ORDER BY s.request_id, m.id
+      `).all(this.petId) as unknown as Array<Omit<MemoryBackupSource, "memoryIds"> & { memoryId: string }>;
+      for (const { memoryId, ...source } of rows) {
+        const entry = sources.get(source.id) ?? { ...source, memoryIds: [] };
+        entry.memoryIds.push(memoryId);
+        sources.set(source.id, entry);
+        linkedIds.add(memoryId);
+      }
+    }
+    const data = {
+      petId: this.petId,
+      records: records.map((record) => {
+        const active = { ...record, sourceAvailable: linkedIds.has(record.id) };
+        delete active.deletedAt;
+        return active;
+      }),
+      sources: [...sources.values()]
+    };
+    assertMemoryBackupData(data);
+    return data;
+  }
+
+  async restoreSnapshot(data: MemoryBackupData): Promise<{ importedCount: number; skippedCount: number }> {
+    assertMemoryBackupData(data);
+    const digest = (value: unknown): string => crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
+    return withPetConfigWriteLock(this.petId, async () => {
+      this.assertOpen();
+      const ids = new Map<string, string>();
+      for (const record of data.records) {
+        const id = data.petId === this.petId ? record.id : `backup-${digest([data.petId, record.id])}`;
+        // Active local records win. Explicitly confirmed restoration can recover
+        // forgotten/cleared records even before physical index cleanup completes.
+        const existing = this.get(id, true);
+        if (!existing || existing.deletedAt) ids.set(record.id, id);
+      }
+      const result = { importedCount: ids.size, skippedCount: data.records.length - ids.size };
+      if (!ids.size) return result;
+      await this.backupBeforeMutation();
+      return this.transaction(() => {
+        const insert = this.database.prepare(`INSERT INTO memories(
+          id, pet_id, chapter, memory_type, content, tags_json, important, origin,
+          source_time, source_available, created_at, updated_at, deleted_at, revision
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+          ON CONFLICT(id) DO UPDATE SET chapter = excluded.chapter, memory_type = excluded.memory_type,
+            content = excluded.content, tags_json = excluded.tags_json, important = excluded.important,
+            origin = excluded.origin, source_time = excluded.source_time, source_available = excluded.source_available,
+            created_at = excluded.created_at, updated_at = excluded.updated_at, deleted_at = NULL,
+            revision = max(memories.revision + 1, excluded.revision)
+          WHERE memories.deleted_at IS NOT NULL`);
+        for (const record of data.records) {
+          const id = ids.get(record.id);
+          if (!id) continue;
+          const existing = this.get(id, true);
+          const memory: MemoryRecord = {
+            ...record, id, petId: this.petId,
+            revision: existing ? Math.max(existing.revision + 1, record.revision) : record.revision
+          };
+          insert.run(id, this.petId, memory.chapter, memory.memoryType, memory.content, JSON.stringify(memory.tags),
+            Number(memory.important), memory.origin, memory.sourceTime ?? null, Number(memory.sourceAvailable),
+            memory.createdAt, memory.updatedAt, memory.revision);
+          this.insertOutbox("upsert", id, memory);
+        }
+        for (const source of data.sources) {
+          const memoryIds = source.memoryIds.flatMap((id) => ids.has(id) ? [ids.get(id)!] : []);
+          if (!memoryIds.length) continue;
+          const contentHash = digest([source.userText, source.assistantReply, source.occurredAt, source.organizedAt]);
+          const requestId = `backup-${digest([data.petId, source.id, contentHash])}`;
+          const previous = this.database.prepare("SELECT content_hash, memory_ids_json FROM idempotency WHERE request_id = ?").get(requestId) as { content_hash: string; memory_ids_json: string } | undefined;
+          let previousIds: unknown;
+          try { previousIds = previous ? JSON.parse(previous.memory_ids_json) : []; }
+          catch { throw new MemoryLedgerError("LEDGER_CORRUPTED", "Stored backup source association is corrupted."); }
+          if (!Array.isArray(previousIds) || previousIds.some((id) => typeof id !== "string") || (previous && previous.content_hash !== contentHash)) {
+            throw new MemoryLedgerError("LEDGER_CORRUPTED", "Stored backup source association is inconsistent.");
+          }
+          const combined = [...new Set([...previousIds as string[], ...memoryIds])];
+          if (combined.length > MEMORY_LIMITS.backendItemsMax) throw new MemoryValidationError("单轮来源关联的记忆超过数量限制。");
+          this.database.prepare(`INSERT INTO source_turns(request_id, pet_id, user_text, assistant_reply, occurred_at, created_at)
+            VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(request_id) DO NOTHING`)
+            .run(requestId, this.petId, source.userText, source.assistantReply, source.occurredAt, source.organizedAt);
+          this.database.prepare(`INSERT INTO idempotency(request_id, pet_id, content_hash, memory_ids_json, created_at)
+            VALUES (?, ?, ?, ?, ?) ON CONFLICT(request_id) DO UPDATE SET memory_ids_json = excluded.memory_ids_json`)
+            .run(requestId, this.petId, contentHash, JSON.stringify(combined), source.organizedAt);
+        }
+        this.database.prepare("INSERT INTO index_metadata(key, value) VALUES ('dirty', '1') ON CONFLICT(key) DO UPDATE SET value = '1'").run();
+        return result;
       });
     });
   }

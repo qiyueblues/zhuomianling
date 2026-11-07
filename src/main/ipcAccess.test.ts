@@ -80,6 +80,9 @@ describe("assertIpcSenderAllowed", () => {
       "memory:create",
       "memory:clear",
       "memory:export",
+      "memory:prepare-import",
+      "memory:confirm-import",
+      "memory:cancel-import",
       "memory:save-settings",
       "memory:rebuild-index"
       ,"preset-voice:get-overview"

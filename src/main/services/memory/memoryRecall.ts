@@ -16,14 +16,16 @@ import { MemuMemoryBackend } from "./MemuMemoryBackend";
 import { ensureSafeMemoryChildDirectory, ensureSafeMemoryPaths } from "./memoryPaths";
 import {
   buildMemoryRecallQuery,
-  buildUntrustedMemoryContext
+  buildUntrustedMemoryContext,
+  selectMemoryRecallItems,
+  type MemoryRecallContextItem
 } from "./memoryPrompt";
 
 const recallDeadlineMs = 1_200;
 
 export interface MemoryRecallDiagnostic {
   petId: string;
-  stage: "settings" | "index" | "retrieve" | "context";
+  stage: "settings" | "index" | "retrieve" | "sources" | "context";
   code: string;
   durationMs: number;
   recalledCount?: number;
@@ -43,6 +45,7 @@ export interface AiMemoryRecallDependencies {
     settings: MemorySettings,
     signal: AbortSignal
   ): Promise<MemoryResult<MemoryRetrieveResponse>>;
+  openLedger?(petId: string): Promise<Pick<MemoryLedger, "get" | "getSourceConversation" | "close">>;
   onDiagnostic?(diagnostic: MemoryRecallDiagnostic): void;
   now?: () => number;
   deadlineMs?: number;
@@ -63,6 +66,7 @@ export class AiMemoryRecallService {
     let stage: MemoryRecallDiagnostic["stage"] = "settings";
     const onAbort = () => controller.abort(signal.reason);
     signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
     const timer = setTimeout(() => {
       timedOut = true;
       controller.abort("memory-recall-timeout");
@@ -95,11 +99,33 @@ export class AiMemoryRecallService {
         return { recalledCount: 0 };
       }
 
+      if (controller.signal.aborted) throw new Error("recall-aborted");
+      let items: MemoryRecallContextItem[] = selectMemoryRecallItems(
+        response.value.items.filter((item) => item.memory.petId === petId),
+        settings
+      );
+      if (response.value.answerPolicy !== "unknown" && items.length && this.dependencies.openLedger) {
+        stage = "sources";
+        const ledger = await this.dependencies.openLedger(petId);
+        try {
+          if (controller.signal.aborted) throw new Error("recall-aborted");
+          // The index selects candidates; the ledger owns current text, deletion and sources.
+          items = items.flatMap((item) => {
+            const memory = ledger.get(item.memory.id);
+            if (!memory || memory.deletedAt || memory.petId !== petId) return [];
+            const source = memory.sourceAvailable ? ledger.getSourceConversation(memory.id) : undefined;
+            return [{ memory, score: item.score, source }];
+          });
+        } finally {
+          ledger.close();
+        }
+      }
+      if (controller.signal.aborted) throw new Error("recall-aborted");
       stage = "context";
       const context = buildUntrustedMemoryContext(
-        response.value.items,
+        items,
         settings,
-        response.value.answerPolicy
+        response.value.answerPolicy === "verified" && !items.length ? "unknown" : response.value.answerPolicy
       );
       diagnose("ok", context.includedCount);
       return { context: context.context, recalledCount: context.includedCount };
@@ -230,6 +256,7 @@ export function getExistingRuntimeComponents(): Promise<MemoryRuntimeComponents>
 
 const defaultRecallService = new AiMemoryRecallService({
   getSettings: getLocalPetMemorySettings,
+  openLedger: (petId) => MemoryLedger.open(petId),
   async synchronize(petId, signal) {
     const components = await getRuntimeComponents();
     const ledger = await MemoryLedger.open(petId);
