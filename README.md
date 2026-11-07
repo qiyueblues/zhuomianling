@@ -104,6 +104,8 @@ Live2D 导入完成后，进入“表现映射”给需要使用的动作或表�
 
 发布者在 `docs/releases/current.md` 维护当前版本的更新说明，打包会自动将其嵌入 `latest.yml`，GitHub Release 正文也使用同一文件。向 OSS 的 `updates/windows/` 先上传安装包和 blockmap，最后覆盖 `latest.yml`；无需另外上传说明文件。首次带有更新功能的版本仍需用户手动安装，后续更高版本才会被检测到。
 
+更新安装窗口使用桌面灵图标、浅色卡片和蓝色进度条，流光只在已完成的蓝条内显示，并遵循 Windows 动画设置。`dist:win` 会先运行 `prepare:installer-ui`，使用系统 .NET Framework 编译安装器专用绘图辅助程序；该文件仅在安装时临时使用，不进入应用或用户数据，运行时不可用时回退原生进度条。
+
 发布机通过 `OSS_ACCESS_KEY_ID`、`OSS_ACCESS_KEY_SECRET` 环境变量提供上传凭据；不要把值写进源码或配置。`npm.cmd run publish:oss -- --check` 只验证目录读取权限；`npm.cmd run publish:oss -- --dry-run` 审计本地产物并预览上传顺序，不联网。正式构建通过审计、GitHub Release 发布并核对后，执行 `npm.cmd run publish:oss` 同步三个更新文件，最后覆盖 `latest.yml`。相同内容的版本文件会保留并跳过，内容不同的同版本文件或远端更高版本会阻断发布。Windows 入口每次读取当前用户的持久环境变量，不要求重新打开终端；上传 SDK 仅为开发依赖，不进入客户端。
 
 ### 7. 导入、导出与备份

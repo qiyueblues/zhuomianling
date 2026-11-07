@@ -60,7 +60,7 @@ BAAI/bge-small-zh-v1.5 revision
 桌宠包归档依赖
 --------------
 
-`.zmling` 的流式 ZIP 写入与逐 entry 读取分别使用：
+`.zmling` 桌宠包和 `.zmlmem` 记忆备份的流式 ZIP 写入与逐 entry 读取分别使用：
 
 - yazl 3.3.1 — MIT License — https://github.com/thejoshwolfe/yazl
 - yauzl 3.4.0 — MIT License — https://github.com/thejoshwolfe/yauzl
@@ -85,3 +85,8 @@ GitHub Token 或 OSS 密钥，不上传桌宠、聊天、模型、音频、记�
 发布机的 OSS 上传工具使用 ali-oss 6.23.0（MIT License）：
 https://github.com/ali-sdk/ali-oss
 该工具仅为开发依赖，从发布机环境变量读取凭据，不随桌面客户端分发。
+
+更新安装窗口的蓝条绘图辅助程序由本项目源码编译，只嵌入 NSIS 安装器的
+临时插件目录，使用 Windows 已有的 .NET Framework Windows Forms / GDI+。
+不捆绑 .NET 运行时，不安装额外服务，不进入 app.asar 或用户数据；系统不具备
+所需运行时或绘图辅助程序不可用时使用原生静态进度条。
