@@ -32,6 +32,7 @@ describe("preload capability separation", () => {
     expect(source).toContain('ipcRenderer.invoke("text-to-speech:speak"');
     for (const forbiddenChannel of [
       "pet-config:delete",
+      "app-update:",
       "pet-config:save-basic-info",
       "live2d-import:",
       "ai-settings:",

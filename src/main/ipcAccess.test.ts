@@ -62,6 +62,16 @@ describe("assertIpcSenderAllowed", () => {
     expect(accessByChannel.size).toBeGreaterThan(40);
     for (const channel of [
       "pet-config:delete",
+      "app-update:get-state",
+      "app-update:check",
+      "app-update:download",
+      "app-update:download-github",
+      "app-update:cancel",
+      "app-update:dismiss",
+      "app-update:ignore-version",
+      "app-update:install",
+      "app-update:open-release",
+      "app-update:startup-ready",
       "pet-config:save-basic-info",
       "live2d-import:import-model",
       "ai-settings:save",

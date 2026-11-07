@@ -93,7 +93,9 @@ const voiceModelVersionOptions = [
   { value: "v3", label: "V3" },
   { value: "v4", label: "V4" },
   { value: "v2Pro", label: "V2 Pro" },
-  { value: "v2ProPlus", label: "V2 Pro Plus" }
+  { value: "v2ProPlus", label: "V2 Pro Plus" },
+  { value: "v5dev", label: "V5 Dev" },
+  { value: "v5turbo", label: "V5 Turbo" }
 ];
 
 export function PetEditor({
@@ -1401,7 +1403,7 @@ function VoicePanel({
           <span>GPT-SoVITS 本地根目录（完整文件夹路径）</span>
           <input
             value={draft.gptSoVitsRootPath ?? ""}
-            placeholder="例如：D:\\gpt\\GPT-SoVITS-v2pro"
+            placeholder="例如：D:\\gpt\\GPT-SoVITS"
             onChange={(event) => updateVoiceDraft({ gptSoVitsRootPath: event.target.value })}
           />
         </label>

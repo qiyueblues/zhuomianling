@@ -73,6 +73,24 @@ describe("pet package protocol", () => {
     expect(portable.uiSettings?.customTheme).toBeUndefined();
   });
 
+  it.each(["v5dev", "v5turbo"] as const)("preserves %s through portable export and import", (modelVersion) => {
+    const portable = createPortablePetDefinition({
+      ...pet,
+      voiceModelSettings: {
+        enabled: false, connected: false, modelVersion,
+        referenceText: "参考文本", language: "zh", playMode: "sentence"
+      }
+    }, "live2d/model.model3.json", {
+      sovitsModel: "voice/models/sovits/voice.pth",
+      gptModel: "voice/models/gpt/voice.ckpt",
+      referenceAudio: "voice/reference/reference.wav"
+    });
+
+    const imported = parsePortablePetDefinition(JSON.parse(JSON.stringify(portable)));
+    expect(imported.voiceModelSettings?.modelVersion).toBe(modelVersion);
+    expect(imported.voiceModelSettings?.sovitsModel).toBe("voice/models/sovits/voice.pth");
+  });
+
   it("rejects secrets and absolute paths in portable data", () => {
     const base = createPortablePetDefinition(pet, "live2d/model.model3.json");
     expect(() => parsePortablePetDefinition({ ...base, apiKey: "secret" })).toThrow(/禁止字段|未知字段/);

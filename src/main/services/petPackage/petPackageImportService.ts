@@ -29,7 +29,7 @@ import { writeJsonFileAtomically } from "../config/durableJsonFile";
 import { getLocalPetsRootPath } from "../config/petConfigPersistence";
 import { withPetConfigWriteLock } from "../config/petConfigWriteQueue";
 import { listLocalPets, stopManagedGptSoVitsApi, validateReferenceAudioDuration } from "../config/petConfigStore";
-import { validateGptSoVitsRoot } from "../speech/voiceResourceValidation";
+import { validateVoiceModelResources } from "../speech/voiceResourceValidation";
 import { validateLive2DFolder } from "../config/live2dImportService";
 import { beginPetPackageOperation, finishPetPackageOperation, updatePetPackageProgress } from "./petPackageOperation";
 import { validateIpcArguments } from "../../ipcValidation";
@@ -361,7 +361,10 @@ export async function testPetPackageImportVoice(sessionId: string, gptSoVitsRoot
   const voiceRoot = gptSoVitsRootPath.trim();
   updatePetPackageProgress(session.operationId, "import", "test-voice", 0, 0, true);
   try {
-    await validateGptSoVitsRoot(voiceRoot);
+    await validateVoiceModelResources({
+      ...materializePet(session).voiceModelSettings,
+      gptSoVitsRootPath: voiceRoot
+    });
     session.voiceRoot = voiceRoot;
     return { ok: true, message: "GPT-SoVITS 完整目录检测通过。" };
   } catch (error) {

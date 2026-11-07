@@ -602,6 +602,22 @@ describe("avatar draft cleanup", () => {
 });
 
 describe("GPT-SoVITS resource validation", () => {
+  it.each(["v5dev", "v5turbo"] as const)("persists and reloads a disabled %s configuration without requiring resources", async (modelVersion) => {
+    await writeLegacyPet();
+    const { saveLocalPetVoiceModel, listLocalPets } = await import("./petConfigStore");
+    const result = await saveLocalPetVoiceModel({
+      petId: "pet-a", enabled: false, connected: false, modelVersion,
+      referenceText: "", referenceLanguage: "zh", language: "zh", playMode: "sentence",
+      inferenceDevice: "cpu", halfPrecision: false, syncTextWithVoice: true
+    });
+
+    expect(result.ok, result.message).toBe(true);
+    const stored = JSON.parse(await fs.readFile(getPetConfigPath(), "utf8"));
+    expect(stored.voiceModelSettings.modelVersion).toBe(modelVersion);
+    const reloaded = (await listLocalPets()).find((pet) => pet.id === "pet-a");
+    expect(reloaded?.voiceModelSettings).toMatchObject({ modelVersion, enabled: false, connected: false });
+  });
+
   it("does not append historical inference logs to a missing-resource error", async () => {
     const petId = "voice-resource-test";
     const voiceRootPath = path.join(temporaryDirectory, "gpt-sovits");
@@ -650,14 +666,14 @@ describe("GPT-SoVITS resource validation", () => {
     expect(result.message).not.toContain("最近日志");
   });
 
-  it("writes the selected model version into the managed runtime config", async () => {
+  it.each(["v4", "v5dev", "v5turbo"] as const)("writes %s into the managed runtime config", async (modelVersion) => {
     const { buildGptSoVitsRuntimeConfigContent } = await import("./petConfigStore");
     const content = buildGptSoVitsRuntimeConfigContent(
       {
         gptSoVitsRootPath: "D:\\GPT-SoVITS",
         sovitsModelPath: "D:\\weights\\voice.pth",
         gptModelPath: "D:\\weights\\voice.ckpt",
-        modelVersion: "v4"
+        modelVersion
       },
       {
         device: "cpu",
@@ -665,7 +681,7 @@ describe("GPT-SoVITS resource validation", () => {
       }
     );
 
-    expect(content).toContain("  version: v4\n");
+    expect(content).toContain(`  version: ${modelVersion}\n`);
     expect(content).not.toContain("version: v2ProPlus");
   });
 });

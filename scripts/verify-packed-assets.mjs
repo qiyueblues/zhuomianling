@@ -1,7 +1,8 @@
 import { listPackage } from "@electron/asar";
 import { spawnSync } from "node:child_process";
-import { stat } from "node:fs/promises";
+import { stat, readFile } from "node:fs/promises";
 import path from "node:path";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import {
   isForbiddenReleasePath,
@@ -79,6 +80,24 @@ try {
 }
 
 console.log("Packed asset audit passed: system-browser tutorial entry is unpacked.");
+
+try {
+  const updaterRequire = createRequire(path.join(projectRoot, "node_modules/electron-updater/package.json"));
+  const { load } = updaterRequire("js-yaml");
+  const updateConfig = load(await readFile(path.join(projectRoot, "release", "win-unpacked", "resources", "app-update.yml"), "utf8"));
+  if (updateConfig?.provider !== "generic" ||
+    updateConfig.url !== "https://zhuomianling.oss-cn-beijing.aliyuncs.com/updates/windows/" ||
+    updateConfig.token || updateConfig.requestHeaders || updateConfig.useMultipleRangeRequest !== false) {
+    throw new Error("updater must use the public project OSS source without credentials or custom headers");
+  }
+  if (!entries.some((entry) => entry.replace(/\\/g, "/").endsWith("/node_modules/electron-updater/out/main.js"))) {
+    throw new Error("electron-updater runtime is missing from app.asar");
+  }
+} catch (error) {
+  console.error(`Packed asset audit failed: ${error instanceof Error ? error.message : "invalid updater configuration"}`);
+  process.exit(1);
+}
+console.log("Packed asset audit passed: public OSS update source and updater runtime are present.");
 
 const memoryRuntimeRoot = path.join(
   projectRoot,

@@ -1,6 +1,6 @@
 {
   "name": "zhuomianling",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "private": true,
   "license": "MIT",
   "description": "Open-source customizable Live2D desktop pet framework with chat, subtitles, and optional voice features.",
@@ -11,20 +11,31 @@
     "dev:electron": "tsc -p tsconfig.electron.json",
     "prepare:memory-runtime": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-memory-runtime.ps1",
     "verify:memory-runtime": "node scripts/verify-memory-runtime.mjs",
-    "build": "npm run typecheck && vite build && node scripts/clean-electron-output.mjs && tsc -p tsconfig.electron.json && npm run verify:release-assets",
+    "build": "npm run verify:release-notes && npm run typecheck && vite build && node scripts/clean-electron-output.mjs && tsc -p tsconfig.electron.json && npm run verify:release-assets",
     "start:prod": "cross-env NODE_ENV=production VITE_DEV_SERVER_URL= electron .",
     "preview:prod": "npm run build && npm run start:prod",
-    "pack": "npm run build && npm run verify:memory-runtime && electron-builder --dir && npm run verify:packed-assets",
-    "dist:win": "npm run build && npm run verify:memory-runtime && electron-builder --win && npm run verify:packed-assets",
+    "pack": "npm run build && npm run verify:memory-runtime && electron-builder --dir --publish never && npm run verify:packed-assets",
+    "dist:win": "npm run build && npm run verify:memory-runtime && electron-builder --win --publish never && npm run verify:packed-assets && npm run verify:update-artifacts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.electron.json",
     "verify:packed-assets": "node scripts/verify-packed-assets.mjs",
+    "verify:update-artifacts": "node scripts/verify-update-artifacts.mjs",
+    "verify:release-notes": "node scripts/verify-release-notes.mjs",
+    "publish:oss": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-oss.ps1",
     "verify:release-assets": "node scripts/verify-release-assets.mjs",
     "preview": "vite preview --host 127.0.0.1"
   },
   "build": {
     "appId": "dev.zhuomianling.desktop",
     "productName": "桌面灵",
+    "publish": {
+      "provider": "generic",
+      "url": "https://zhuomianling.oss-cn-beijing.aliyuncs.com/updates/windows/",
+      "useMultipleRangeRequest": false
+    },
+    "releaseInfo": {
+      "releaseNotesFile": "docs/releases/current.md"
+    },
     "asar": true,
     "electronDist": "node_modules/electron/dist",
     "directories": {
@@ -52,6 +63,10 @@
       "!node_modules/pend/test.js",
       "!node_modules/buffer-crc32/dist/*.d.cts",
       "!node_modules/buffer-crc32/dist/*.d.mts",
+      "!node_modules/**/*.map",
+      "!node_modules/**/*.d.ts",
+      "!node_modules/**/bin/**",
+      "!node_modules/js-yaml/dist/**",
       "assets/icons/**/*",
       "!*.cmd",
       "package.json",
@@ -99,13 +114,14 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "桌面灵",
-      "artifactName": "桌面灵 Setup ${version}.${ext}"
+      "artifactName": "zhuomianling-setup-${version}.${ext}"
     },
     "portable": {
       "artifactName": "桌面灵.${ext}"
     }
   },
   "dependencies": {
+    "electron-updater": "^6.8.11",
     "yauzl": "^3.4.0",
     "yazl": "^3.3.1"
   },
@@ -117,6 +133,7 @@
     "@types/yauzl": "^3.4.0",
     "@types/yazl": "^3.3.1",
     "@vitejs/plugin-react": "^4.3.4",
+    "ali-oss": "6.23.0",
     "concurrently": "^9.1.0",
     "cross-env": "^7.0.3",
     "electron": "^43.0.0",

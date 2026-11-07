@@ -76,6 +76,16 @@ const speechSessionIdPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$/;
 
 export const validatedIpcChannels = new Set([
   "app:get-version",
+  "app-update:get-state",
+  "app-update:check",
+  "app-update:download",
+  "app-update:download-github",
+  "app-update:cancel",
+  "app-update:dismiss",
+  "app-update:ignore-version",
+  "app-update:install",
+  "app-update:open-release",
+  "app-update:startup-ready",
   "app:open-local-help",
   "timed-diagnostics-test:get-snapshot",
   "app-window:is-shown",
@@ -679,6 +689,16 @@ export function validateIpcArguments(channel: string, args: unknown[]): void {
 
   const noArgumentChannels = new Set([
     "app:get-version",
+    "app-update:get-state",
+    "app-update:check",
+    "app-update:download",
+    "app-update:download-github",
+    "app-update:cancel",
+    "app-update:dismiss",
+    "app-update:ignore-version",
+    "app-update:install",
+    "app-update:open-release",
+    "app-update:startup-ready",
     "app:open-local-help",
     "app-window:is-shown",
     "pet-config:list-local",

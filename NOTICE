@@ -66,3 +66,22 @@ BAAI/bge-small-zh-v1.5 revision
 - yauzl 3.4.0 — MIT License — https://github.com/thejoshwolfe/yauzl
 
 这些依赖只提供通用归档能力，不包含任何用户桌宠、模型、声音或配置数据。
+
+
+应用更新依赖
+------------
+
+Windows 安装版使用 electron-updater 6.8.11（MIT License）从公开阿里云 OSS
+读取版本和更新说明，下载并校验更新包，以及在用户确认后启动 NSIS 安装程序；
+用户也可主动选择从本项目 GitHub Release 下载同一版本：
+https://github.com/electron-userland/electron-builder
+
+运行依赖包括 builder-util-runtime、fs-extra、graceful-fs、js-yaml、jsonfile、
+lazy-val、lodash.escaperegexp、lodash.isequal、semver、tiny-typed-emitter、debug、
+ms、sax、universalify（MIT / ISC / BlueOak-1.0.0）及 argparse（Python-2.0）；具体版本由
+package-lock.json 锁定，各依赖的原始许可证随应用保留。更新链路不需要
+GitHub Token 或 OSS 密钥，不上传桌宠、聊天、模型、音频、记忆或 API Key。
+
+发布机的 OSS 上传工具使用 ali-oss 6.23.0（MIT License）：
+https://github.com/ali-sdk/ali-oss
+该工具仅为开发依赖，从发布机环境变量读取凭据，不随桌面客户端分发。

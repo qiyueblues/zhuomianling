@@ -1,6 +1,7 @@
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
+import type { PetVoiceModelVersion } from "../../../shared/types/pet";
 
 export type VoiceFileKind = "sovits" | "gpt" | "referenceAudio";
 
@@ -54,7 +55,10 @@ export async function validateReadableVoiceFile(filePath: string, kind: VoiceFil
   }
 }
 
-export async function validateGptSoVitsRoot(rootPath: string | undefined): Promise<void> {
+export async function validateGptSoVitsRoot(
+  rootPath: string | undefined,
+  modelVersion?: PetVoiceModelVersion
+): Promise<void> {
   const normalized = rootPath?.trim() ?? "";
   if (!normalized) {
     throw new VoiceResourceValidationError("请先选择 GPT-SoVITS 本地目录。");
@@ -72,6 +76,12 @@ export async function validateGptSoVitsRoot(rootPath: string | undefined): Promi
       { relativePath: path.join("GPT_SoVITS", "pretrained_models", "chinese-roberta-wwm-ext-large"), kind: "directory" as const },
       { relativePath: path.join("GPT_SoVITS", "pretrained_models", "chinese-hubert-base"), kind: "directory" as const }
     ];
+    if (modelVersion === "v5dev" || modelVersion === "v5turbo") {
+      requiredEntries.push(
+        { relativePath: path.join("GPT_SoVITS", "module", "models_v5.py"), kind: "file" },
+        { relativePath: path.join("GPT_SoVITS", "pretrained_models", "gsv-v5-pretrained", "vocoder.pth"), kind: "file" }
+      );
+    }
     for (const required of requiredEntries) {
       const target = path.join(normalized, required.relativePath);
       let targetStat: fsSync.Stats;
@@ -96,15 +106,52 @@ export async function validateGptSoVitsRoot(rootPath: string | undefined): Promi
 }
 
 export async function validateVoiceModelResources(value: {
+  modelVersion?: PetVoiceModelVersion;
   gptSoVitsRootPath?: string;
   sovitsModelPath?: string;
   gptModelPath?: string;
   referenceAudioPath?: string;
 }): Promise<void> {
-  await validateGptSoVitsRoot(value.gptSoVitsRootPath);
+  await validateGptSoVitsRoot(value.gptSoVitsRootPath, value.modelVersion);
   await validateReadableVoiceFile(value.sovitsModelPath ?? "", "sovits");
   await validateReadableVoiceFile(value.gptModelPath ?? "", "gpt");
   await validateReadableVoiceFile(value.referenceAudioPath ?? "", "referenceAudio");
+
+  if (value.modelVersion === "v5dev" || value.modelVersion === "v5turbo") {
+    // Official V5 LoRA files use a two-byte version header, independent of their filename.
+    const header = Buffer.alloc(2);
+    try {
+      const file = await fs.open(value.sovitsModelPath?.trim() ?? "", "r");
+      try {
+        await file.read(header, 0, header.length, 0);
+      } finally {
+        await file.close();
+      }
+    } catch {
+      throw new VoiceResourceValidationError("无法读取 SoVITS 模型，请重新选择后重试。");
+    }
+    const versionHeader = header.toString("ascii");
+    const loraVersion = versionHeader === "07" ? "v5dev"
+      : versionHeader === "08" ? "v5turbo" : undefined;
+    if (loraVersion && loraVersion !== value.modelVersion) {
+      throw new VoiceResourceValidationError(
+        `所选 SoVITS LoRA 模型与模型版本不匹配，请选择 ${loraVersion === "v5dev" ? "V5 Dev" : "V5 Turbo"}。`
+      );
+    }
+    if (loraVersion) {
+      const baseModelPath = path.join(
+        value.gptSoVitsRootPath?.trim() ?? "", "GPT_SoVITS", "pretrained_models", "gsv-v5-pretrained", `s2G${loraVersion}.pth`
+      );
+      try {
+        await validateReadableVoiceFile(baseModelPath, "sovits");
+      } catch (error) {
+        if (!(error instanceof VoiceResourceValidationError)) throw error;
+        throw new VoiceResourceValidationError(
+          `${error.message} V5 LoRA 需要在 GPT_SoVITS/pretrained_models/gsv-v5-pretrained/ 中保留对应底模。`
+        );
+      }
+    }
+  }
 }
 
 export function sanitizeVoiceDiagnosticText(raw: string, maximumChars = 1_200): string {

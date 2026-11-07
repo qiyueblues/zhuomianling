@@ -68,6 +68,7 @@ import type {
   MemoryUpdateRequest
 } from "../shared/types/memory";
 import type { StartupRendererStage } from "../shared/types/startup";
+import type { AppUpdateState, AppUpdateActionResult } from "../shared/types/appUpdate";
 import type { LocalPetMoodSettingsDraft, PetMoodEditorState, PetMoodEnterPreviewRequest, PetMoodVoiceImportRequest, PetMoodVoiceImportResult, PetMoodVoiceRemoveRequest } from "../shared/types/mood";
 import type {
   PresetVoiceDeleteOneRequest,
@@ -113,6 +114,23 @@ const startupTimingEnabled = process.env.ZHUOMIANLING_STARTUP_TIMING === "1";
 
 const desktopPetApi = {
   getAppVersion: () => ipcRenderer.invoke("app:get-version") as Promise<string>,
+  appUpdate: {
+    getState: () => ipcRenderer.invoke("app-update:get-state") as Promise<AppUpdateState>,
+    check: () => ipcRenderer.invoke("app-update:check") as Promise<AppUpdateState>,
+    download: () => ipcRenderer.invoke("app-update:download") as Promise<AppUpdateState>,
+    downloadGithub: () => ipcRenderer.invoke("app-update:download-github") as Promise<AppUpdateState>,
+    cancel: () => ipcRenderer.invoke("app-update:cancel") as Promise<AppUpdateState>,
+    dismiss: () => ipcRenderer.invoke("app-update:dismiss") as Promise<AppUpdateState>,
+    ignoreVersion: () => ipcRenderer.invoke("app-update:ignore-version") as Promise<AppUpdateActionResult>,
+    install: () => ipcRenderer.invoke("app-update:install") as Promise<AppUpdateActionResult>,
+    openReleasePage: () => ipcRenderer.invoke("app-update:open-release") as Promise<AppUpdateActionResult>,
+    startupReady: () => ipcRenderer.send("app-update:startup-ready"),
+    onChanged: (callback: (state: AppUpdateState) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, state: AppUpdateState): void => callback(state);
+      ipcRenderer.on("app-update:changed", listener);
+      return () => { ipcRenderer.off("app-update:changed", listener); };
+    }
+  },
   // TIMED DIAGNOSTICS TEST MODULE: main-window-only development diagnostics.
   timedDiagnosticsTest: {
     getSnapshot: () =>

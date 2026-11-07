@@ -40,6 +40,17 @@ function modelText(model: string): string {
   return compact(normalized);
 }
 
+function isDeepSeekV41OrLater(model: string): boolean {
+  // Keep version separators: compacting V4.0 would make it look like V40.
+  const version = normalize(model).match(
+    /(?:^|[/:])deepseek[-_\s]*v(\d+)(?:\.(\d+)(?:\.\d+)*)?(?=$|[-_\s/:]|[a-z])/u
+  );
+  if (!version) return false;
+  const major = Number(version[1]);
+  const minor = Number(version[2] ?? 0);
+  return major > 4 || (major === 4 && minor >= 1);
+}
+
 const multimodalRules: readonly ModelRule[] = [
   // OpenAI and compatible relays.
   { model: /(?:gpt4o|gpt41|gpt45|gpt4turbo|gpt4vision|chatgpt4o|gpt5)/u },
@@ -70,8 +81,8 @@ const multimodalRules: readonly ModelRule[] = [
   { model: /internvl/u },
   { model: /minicpm(?:v|o|3v|4v)/u },
   { model: /yivl/u },
-  // DeepSeek V4 Flash Vision Exp is visual; keep the exact model id here so
-  // ordinary DeepSeek V4 Flash and V4 Pro models remain text-only below.
+  // DeepSeek V4.1+ uses the version policy above; retain this older visual
+  // variant while ordinary V4 Flash and V4 Pro remain text-only below.
   { model: /deepseekv4flashvisionexp/u },
   { model: /deepseek(?:vl|ocr)/u },
   { model: /(?:llava|idefics|paligemma|molmo|ovis|aria)/u },
@@ -90,8 +101,8 @@ const multimodalRules: readonly ModelRule[] = [
 ];
 
 const textOnlyRules: readonly ModelRule[] = [
-  // DeepSeek's public chat/reasoning API is text-only. DeepSeek-VL/VL2 is
-  // intentionally listed above as a separate open/hosted model family.
+  // Legacy DeepSeek text models and unversioned chat/reasoner aliases.
+  // V4.1+ is matched first; VL/VL2 remains a separate visual model family.
   { model: /deepseek(?:chat|reasoner|r1|r2|coder|v3|v31|v4(?:flash|pro))/u },
   { provider: /(?:deepseek|深度求索)/u, model: /(?:^|)(?:chat|reasoner|r1|r2|v3|v31|v4(?:flash|pro))/u },
 
@@ -128,7 +139,7 @@ export function classifyScreenVisionModel(
   if (!model) return "unknown";
   const provider = providerText(identity);
 
-  if (multimodalRules.some((rule) => matchesRule(rule, model, provider))) {
+  if (isDeepSeekV41OrLater(identity.model) || multimodalRules.some((rule) => matchesRule(rule, model, provider))) {
     return "multimodal";
   }
   if (textOnlyRules.some((rule) => matchesRule(rule, model, provider))) {

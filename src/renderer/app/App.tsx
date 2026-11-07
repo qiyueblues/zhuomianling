@@ -32,6 +32,11 @@ const HelpCenter = lazy(async () => {
   const module = await import("../components/HelpCenter/HelpCenter");
   return { default: module.HelpCenter };
 });
+const AppUpdateControl = lazy(async () => {
+  await import("../styles/surfaces/84-app-update.css");
+  const module = await import("../components/AppUpdate/AppUpdateControl");
+  return { default: module.AppUpdateControl };
+});
 
 type AppView = "selector" | "editor" | "memoryBook" | "timedDiagnosticsTest";
 
@@ -754,9 +759,14 @@ export function App(): JSX.Element {
     }
   };
 
+  const updateControl = !isStartupSplashVisible ? (
+    <Suspense fallback={null}><AppUpdateControl showButton={currentView === "selector"} /></Suspense>
+  ) : null;
+
   if (currentView === "timedDiagnosticsTest") {
     return (
       <main className="appShell timedDiagnosticsTestShell">
+        {updateControl}
         <DeferredViewBoundary
           resetKey="timed-diagnostics-test"
           title="开发者监测页面加载失败"
@@ -774,6 +784,7 @@ export function App(): JSX.Element {
   if (currentView === "editor") {
     return (
       <main className="appShell editorViewShell">
+        {updateControl}
         <DeferredViewBoundary
           resetKey={`editor:${editorSelectedPetId}`}
           title="桌宠编辑器加载失败"
@@ -806,6 +817,7 @@ export function App(): JSX.Element {
   if (currentView === "memoryBook" && selectedPet) {
     return (
       <main className="appShell memoryBookViewShell">
+        {updateControl}
         <DeferredViewBoundary
           resetKey={`memory:${selectedPet.id}`}
           title="记忆书加载失败"
@@ -837,6 +849,7 @@ export function App(): JSX.Element {
           <span>主页</span>
         </div>
         <div className="topbarActionGroup">
+          {updateControl}
           {TIMED_DIAGNOSTICS_TEST_ENABLED ? (
             <button
               className="topbarImportButton timedDiagnosticsTopbarButton"

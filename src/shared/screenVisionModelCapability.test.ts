@@ -24,8 +24,25 @@ describe("screen vision model-name routing", () => {
   });
 
   it.each([
+    "deepseek-v4.1-flash",
+    "deepseekv4.1flash",
+    "DeepSeek_V4.1_Flash",
+    "deepseek-v4.1-pro",
+    "deepseek-ai/DeepSeek-V4.1",
+    "models/deepseek-v4.1.0-flash",
+    "deepseek-v4.2-flash",
+    "deepseek-v4.10-pro",
+    "deepseek-v5-flash",
+    "deepseek-v10-pro"
+  ])("classifies DeepSeek V4.1 and later versions as multimodal: %s", (model) => {
+    expect(classifyScreenVisionModel({ providerName: "中转站", model })).toBe("multimodal");
+  });
+
+  it.each([
     ["DeepSeek", "deepseek-v4-flash"],
     ["DeepSeek", "deepseek-v4-pro"],
+    ["DeepSeek", "deepseek-v3.1"],
+    ["DeepSeek", "deepseek-reasoner"],
     ["DeepSeek", "deepseek-chat"],
     ["百川", "Baichuan4"],
     ["OpenAI", "gpt-3.5-turbo"],
@@ -39,4 +56,11 @@ describe("screen vision model-name routing", () => {
     expect(classifyScreenVisionModel({ providerName: "OpenAI", model: "vision-alias" })).toBe("unknown");
     expect(classifyScreenVisionModel({ providerName: "中转站", baseUrl: "https://relay.example.com/v1", model: "default" })).toBe("unknown");
   });
+
+  it.each(["deepseek-v4.0-flash", "deepseek-v4.0.1-flash", "deepseek-v4.x-flash", "default"])(
+    "does not infer a newer DeepSeek version from an unknown model: %s",
+    (model) => {
+      expect(classifyScreenVisionModel({ providerName: "DeepSeek", model })).toBe("unknown");
+    }
+  );
 });

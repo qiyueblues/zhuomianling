@@ -29,6 +29,7 @@ import { cancelAllPetPackageOperations } from "./services/petPackage/petPackageO
 import { screenCaptureService } from "./services/screen/ScreenCaptureService";
 import { decideScreenPermission } from "./services/screen/screenCapturePermissions";
 import { stopLocalHelpServer } from "./services/help/localHelpServer";
+import { configureAppUpdates, stopAppUpdates } from "./appUpdates";
 
 let mainWindow: Electron.BrowserWindow | null = null;
 let isQuitting = false;
@@ -118,12 +119,14 @@ if (!gotLock) {
   app.quit();
 } else {
   app.on("before-quit", (event) => {
+    stopAppUpdates();
     if (shutdownCleanupCompleted) {
       return;
     }
 
     event.preventDefault();
-    shutdownCleanupPromise ??= runShutdownCleanup()
+    shutdownCleanupPromise ??= runShutdownCleanup();
+    void shutdownCleanupPromise
       .catch((error) => {
         console.warn("Failed to complete application shutdown cleanup.", error);
       })
@@ -231,6 +234,28 @@ if (!gotLock) {
       createMainWindow
     );
     startupProfiler.measureSyncOnce("ipc-and-tray-registered", "注册 IPC 与托盘", () => {
+      configureAppUpdates({
+        prepareToInstall: async () => {
+          // Finish audio, capture, sidecars and durable writes before spawning
+          // the installer. before-quit reuses this same cleanup promise.
+          await closePetWindow({ playEffect: false });
+          shutdownCleanupPromise ??= runShutdownCleanup();
+          try {
+            await shutdownCleanupPromise;
+          } catch (error) {
+            shutdownCleanupPromise = undefined;
+            throw error;
+          }
+        },
+        onChanged: (state) => {
+          // An installer launch failure leaves the UI usable. Any subsequent
+          // quit must clean up tasks that the user may start again.
+          if (state.phase === "error") shutdownCleanupPromise = undefined;
+          if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+            mainWindow.webContents.send("app-update:changed", state);
+          }
+        }
+      });
       registerIpc(ipcMain, () => mainWindow);
       createAppTray(() => mainWindow);
     });

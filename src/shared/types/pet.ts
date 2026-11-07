@@ -284,7 +284,9 @@ export const petVoiceModelVersions = [
   "v3",
   "v4",
   "v2Pro",
-  "v2ProPlus"
+  "v2ProPlus",
+  "v5dev",
+  "v5turbo"
 ] as const;
 
 export type PetVoiceModelVersion = (typeof petVoiceModelVersions)[number];

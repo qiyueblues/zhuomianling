@@ -3,6 +3,16 @@ import { describe, expect, it } from "vitest";
 import { validateIpcArguments, validatedIpcChannels } from "./ipcValidation";
 
 describe("validateIpcArguments", () => {
+  it("accepts updater commands only without renderer-supplied URLs, paths or versions", () => {
+    for (const channel of [
+      "app-update:get-state", "app-update:check", "app-update:download", "app-update:download-github", "app-update:cancel",
+      "app-update:dismiss", "app-update:ignore-version", "app-update:install", "app-update:open-release", "app-update:startup-ready"
+    ]) {
+      expect(() => validateIpcArguments(channel, [])).not.toThrow();
+      expect(() => validateIpcArguments(channel, [{ url: "https://untrusted.test/update.exe" }])).toThrow();
+      expect(() => validateIpcArguments(channel, ["1.9.0"])).toThrow();
+    }
+  });
   it("validates bounded main-window pet package requests", () => {
     expect(() => validateIpcArguments("pet-package:begin-import", [])).not.toThrow();
     expect(() => validateIpcArguments("pet-package:export", ["pet-a"])).not.toThrow();
@@ -425,14 +435,14 @@ describe("validateIpcArguments", () => {
   });
 
   it("accepts only supported GPT-SoVITS model versions", () => {
-    expect(() => validateIpcArguments("pet-config:save-voice-model", [{
-      petId: "pet-a",
-      modelVersion: "v4"
-    }])).not.toThrow();
-    expect(() => validateIpcArguments("pet-config:test-voice-model-connection", [{
-      petId: "pet-a",
-      modelVersion: "v5"
-    }])).toThrow(/modelVersion/);
+    for (const channel of ["pet-config:save-voice-model", "pet-config:test-voice-model-connection"]) {
+      for (const modelVersion of ["v4", "v2ProPlus", "v5dev", "v5turbo"]) {
+        expect(() => validateIpcArguments(channel, [{ petId: "pet-a", modelVersion }])).not.toThrow();
+      }
+      for (const modelVersion of ["v5", "v5pro", "future"]) {
+        expect(() => validateIpcArguments(channel, [{ petId: "pet-a", modelVersion }])).toThrow(/modelVersion/);
+      }
+    }
   });
 
   it("accepts a bounded AI output probe and rejects oversized connection fields", () => {

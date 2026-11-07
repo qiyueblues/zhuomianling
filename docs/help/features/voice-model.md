@@ -4,14 +4,24 @@
 
 ![声音模型资源配置页面](./images/voice-model-resources.png)
 
-进入“语音系统 → 声音模型”，先在“资源配置”中连接 GPT-SoVITS 服务，再完成模型选择：
+进入“语音系统 → 声音模型”，先填写“资源配置”，再连接 GPT-SoVITS 服务：
 
-1. 选择模型版本，例如 V2 Pro Plus。
+1. 选择与声音权重匹配的模型版本，支持 V1、V2、V3、V4、V2 Pro、V2 Pro Plus、V5 Dev 和 V5 Turbo。
 2. 选择运行设备；电脑支持 CUDA 时，可以按实际环境选择 CUDA。
 3. 根据页面提示选择 SoVITS 模型和 GPT 模型。它们需要来自同一套声音模型资源。
 4. 如果想减少显存占用，可以打开“半精度推理”。
 
 截图中的电脑文件位置和模型文件名已做隐私遮挡；实际使用时，请选择电脑上确实存在、应用可以读取的资源。
+
+## 使用 V5
+
+V5 分为 V5 Dev（`v5dev`）和 V5 Turbo（`v5turbo`），请按所用权重选择。先断开旧服务，再将本地根目录指向已更新且支持 V5 的 GPT-SoVITS 完整目录，选择对应的 SoVITS `.pth` 和 GPT `.ckpt` 文件，填写参考音频及文本后重新连接。
+
+V5 运行目录需要包含 `GPT_SoVITS/module/models_v5.py` 和 `GPT_SoVITS/pretrained_models/gsv-v5-pretrained/vocoder.pth`。使用 LoRA 权重时，该预训练模型目录还需保留对应的 `s2Gv5dev.pth` 或 `s2Gv5turbo.pth` 底模；连接和桌宠包导入会检查这些依赖，缺失时按提示补齐。
+
+V5 沿用官方 `api_v2.py` 的 `/tts` 接口，采样步数和引导参数采用服务端默认值：Turbo 为 4 步，Dev 为 32 步、`cfg_rate=1.3`。参考文本仍需填写。旧配置未指定版本时仍按 V2 Pro Plus 读取，不会自动改为 V5。
+
+接口与依赖依据：[官方推理实现](https://github.com/RVC-Boss/GPT-SoVITS/blob/04a44eb977586645f33594b72af13a035a2056c6/GPT_SoVITS/TTS_infer_pack/TTS.py)、[官方 API](https://github.com/RVC-Boss/GPT-SoVITS/blob/04a44eb977586645f33594b72af13a035a2056c6/api_v2.py)。
 
 ## 设置参考音频和语音回复
 

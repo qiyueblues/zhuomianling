@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import fsSync from "node:fs";
 import { ZipFile } from "yazl";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { PetVoiceModelVersion } from "../../../shared/types/pet";
 
 let userData = "";
 vi.mock("electron", () => ({ app: { getPath: () => userData, getVersion: () => "test" } }));
@@ -34,7 +35,13 @@ import {
 } from "../screen/ScreenVisionConnectionStore";
 import { testChatVisionDraft } from "../screen/ScreenVisionService";
 
-async function createValidPackage(filePath: string, options?: { disabledVoiceResources?: boolean; ai?: boolean; retainedTheme?: boolean }): Promise<void> {
+async function createValidPackage(filePath: string, options?: {
+  disabledVoiceResources?: boolean;
+  ai?: boolean;
+  retainedTheme?: boolean;
+  modelVersion?: PetVoiceModelVersion;
+  sovitsHeader?: string;
+}): Promise<void> {
   const disabledVoiceResources = options?.disabledVoiceResources === true;
   const portable = Buffer.from(`${JSON.stringify({
     schemaVersion: 1, live2dEntry: "live2d/model.json", name: "Imported", description: "ok", personaPrompt: "",
@@ -49,7 +56,7 @@ async function createValidPackage(filePath: string, options?: { disabledVoiceRes
       } : {})
     },
     ...(disabledVoiceResources ? { voiceModelSettings: {
-      enabled: false, connected: false, modelVersion: "v2ProPlus", referenceText: "测试",
+      enabled: false, connected: false, modelVersion: options?.modelVersion ?? "v2ProPlus", referenceText: "测试",
       referenceLanguage: "zh", language: "zh", playMode: "sentence",
       sovitsModel: "voice/models/sovits/voice.pth", gptModel: "voice/models/gpt/voice.ckpt", referenceAudio: "voice/reference/reference.wav"
     } } : {})
@@ -58,7 +65,7 @@ async function createValidPackage(filePath: string, options?: { disabledVoiceRes
   const moc = Buffer.from("moc");
   const data = new Map([["pet.json", portable], ["assets/avatar.png", Buffer.from("avatar-image")], ["live2d/model.json", model], ["live2d/model.moc", moc]]);
   if (disabledVoiceResources) {
-    data.set("voice/models/sovits/voice.pth", Buffer.from("sovits"));
+    data.set("voice/models/sovits/voice.pth", Buffer.from(`${options?.sovitsHeader ?? ""}sovits`));
     data.set("voice/models/gpt/voice.ckpt", Buffer.from("gpt"));
     data.set("voice/reference/reference.wav", Buffer.from("RIFF0000WAVE"));
   }
@@ -165,6 +172,39 @@ describe("pet package import staging safety", () => {
 
     expect(checked).toMatchObject({ ok: false, message: expect.stringContaining("不是完整的 GPT-SoVITS 文件夹") });
     await cancelPetPackageImport(begun.sessionId, 10);
+  });
+
+  it.each([["v5dev", "07"], ["v5turbo", "08"]] as const)("checks %s runtime and LoRA dependencies before committing an import", async (modelVersion, sovitsHeader) => {
+    vi.mocked(validateLive2DFolder).mockResolvedValue({ ok: true, message: "ok", entryRelativePath: "model.json", checks: [], missingFiles: [], textureCount: 0, motionCount: 0, expressionCount: 0 });
+    const input = path.join(userData, "v5-voice.zmling");
+    await createValidPackage(input, { disabledVoiceResources: true, modelVersion, sovitsHeader });
+    const begun = await beginPetPackageImport(input, 14);
+    expect(begun.ok, begun.message).toBe(true);
+    const voiceRoot = path.join(userData, "gpt-sovits");
+    for (const relativePath of ["runtime/python.exe", "api_v2.py"]) {
+      const target = path.join(voiceRoot, relativePath);
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.writeFile(target, "fixture");
+    }
+    for (const name of ["chinese-roberta-wwm-ext-large", "chinese-hubert-base"]) {
+      await fs.mkdir(path.join(voiceRoot, "GPT_SoVITS", "pretrained_models", name), { recursive: true });
+    }
+
+    const oldRuntime = await testPetPackageImportVoice(begun.sessionId!, voiceRoot, 14);
+    expect(oldRuntime).toMatchObject({ ok: false, message: expect.stringContaining("models_v5.py") });
+    for (const relativePath of ["GPT_SoVITS/module/models_v5.py", "GPT_SoVITS/pretrained_models/gsv-v5-pretrained/vocoder.pth"]) {
+      const target = path.join(voiceRoot, relativePath);
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.writeFile(target, "fixture");
+    }
+    const missingBase = await testPetPackageImportVoice(begun.sessionId!, voiceRoot, 14);
+    expect(missingBase).toMatchObject({ ok: false, message: expect.stringContaining(`s2G${modelVersion}.pth`) });
+    await fs.writeFile(path.join(voiceRoot, "GPT_SoVITS", "pretrained_models", "gsv-v5-pretrained", `s2G${modelVersion}.pth`), "fixture");
+    expect(await testPetPackageImportVoice(begun.sessionId!, voiceRoot, 14)).toMatchObject({ ok: true });
+
+    const committed = await commitPetPackageImport(begun.sessionId!, 14);
+    expect(committed.ok, committed.message).toBe(true);
+    expect(committed.pet?.voiceModelSettings).toMatchObject({ modelVersion, connected: false, gptSoVitsRootPath: voiceRoot });
   });
 
   it("lists import-session models with a main-process-derived provider name", async () => {

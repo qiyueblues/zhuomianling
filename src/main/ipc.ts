@@ -147,6 +147,11 @@ import { revealMainWindowStartupSurface } from "./window";
 import { validateIpcArguments } from "./ipcValidation";
 import { assertIpcPetIdBound, assertIpcSenderAllowed, type IpcAccess } from "./ipcAccess";
 import { startupProfiler } from "./startupProfiler";
+import {
+  getAppUpdateState, checkAppUpdates, scheduleStartupUpdateCheck,
+  downloadAppUpdate, cancelAppUpdate, dismissAppUpdate, ignoreAppUpdateVersion,
+  installAppUpdate, openAppUpdateReleasePage
+} from "./appUpdates";
 import { presetVoiceGenerationService } from "./services/presetVoice/PresetVoiceGenerationService";
 import { exportPetPackage, inspectPetPackageExport } from "./services/petPackage/petPackageExportService";
 import { beginPetPackageImport, cancelPetPackageImport, commitPetPackageImport, listPetPackageImportAiModels, testPetPackageImportAi, testPetPackageImportVoice } from "./services/petPackage/petPackageImportService";
@@ -316,6 +321,17 @@ export function registerIpc(ipcMain: IpcMain, getMainWindow: () => BrowserWindow
   });
 
   handle("app:get-version", "main", () => app.getVersion());
+
+  handle("app-update:get-state", "main", getAppUpdateState);
+  handle("app-update:check", "main", checkAppUpdates);
+  handle("app-update:download", "main", () => downloadAppUpdate());
+  handle("app-update:download-github", "main", () => downloadAppUpdate("github"));
+  handle("app-update:cancel", "main", cancelAppUpdate);
+  handle("app-update:dismiss", "main", dismissAppUpdate);
+  handle("app-update:ignore-version", "main", ignoreAppUpdateVersion);
+  handle("app-update:install", "main", installAppUpdate);
+  handle("app-update:open-release", "main", openAppUpdateReleasePage);
+  on("app-update:startup-ready", "main", scheduleStartupUpdateCheck);
 
   handle("app:open-local-help", "main", openLocalHelpPage);
 

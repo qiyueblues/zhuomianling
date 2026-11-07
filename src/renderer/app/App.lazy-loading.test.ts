@@ -13,6 +13,8 @@ describe("App initial module boundary", () => {
     expect(source).toContain('import("../components/PetStage/PetStage")');
     expect(source).toContain('import("../components/MemoryBook/MemoryBook")');
     expect(source).toContain('import("../components/HelpCenter/HelpCenter")');
+    expect(source).toContain('import("../components/AppUpdate/AppUpdateControl")');
+    expect(source).toContain("const updateControl = !isStartupSplashVisible");
     expect(source).toContain('await import("../styles/surfaces/85-help-center.css")');
     expect(source).not.toMatch(/^import\s+\{\s*HelpCenter\s*\}\s+from/m);
     expect(source).toContain("<DeferredViewBoundary");

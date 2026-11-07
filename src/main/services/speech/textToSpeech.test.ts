@@ -95,6 +95,69 @@ afterEach(async () => {
 });
 
 describe("text-to-speech request lifecycle", () => {
+  it.each(["v5dev", "v5turbo"])("uses the compatible /tts contract and server sampling defaults for %s", async (modelVersion) => {
+    const petConfigPath = path.join(temporaryDirectory, "pets", "pet-a", "pet.local.json");
+    const pet = JSON.parse(await fs.readFile(petConfigPath, "utf8"));
+    pet.voiceModelSettings.modelVersion = modelVersion;
+    await fs.writeFile(petConfigPath, JSON.stringify(pet));
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) =>
+      new Response(new Uint8Array([1, 2, 3]), { headers: { "Content-Type": "audio/wav" } })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const { speakText } = await import("./textToSpeech");
+
+    const result = await speakText(asWebContents(new FakeWebContents()), {
+      petId: "pet-a", requestId: "v5-reply", text: "测试语音。"
+    });
+
+    expect(result).toMatchObject({ ok: true, mimeType: "audio/wav" });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://127.0.0.1:9880/tts");
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    expect(body).toMatchObject({
+      text: "测试语音。", text_lang: "zh", ref_audio_path: referenceAudioPath,
+      prompt_text: "参考文本", prompt_lang: "zh", media_type: "wav", streaming_mode: false
+    });
+    expect(body).not.toHaveProperty("sample_steps");
+    expect(body).not.toHaveProperty("cfg_rate");
+  });
+
+  it("performs a real synthesis for connection checks using the supplied draft config", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(new Uint8Array([1, 2, 3]), {
+        status: 200,
+        headers: { "Content-Type": "audio/wav" }
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const { testTextToSpeechConnection } = await import("./textToSpeech");
+    const controller = new AbortController();
+
+    const result = await testTextToSpeechConnection(
+      {
+        petId: "pet-a",
+        requestId: "connection-test",
+        text: "嗯。"
+      },
+      {
+        baseUrl: "http://127.0.0.1:9880",
+        apiMode: "v2",
+        refAudioPath: referenceAudioPath,
+        promptText: "参考文本",
+        promptLang: "zh",
+        textLang: "zh",
+        textSplitMethod: "cut5",
+        mediaType: "wav"
+      },
+      controller.signal
+    );
+
+    expect(result).toMatchObject({ ok: true, audioBase64: expect.any(String) });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:9880/tts",
+      expect.objectContaining({ method: "POST" })
+    );
+  });
+
   it("uses the mood-selected reference audio for an external screen reply session", async () => {
     const darkenedReferenceAudioPath = path.join(temporaryDirectory, "darkened-reference.wav");
     await fs.writeFile(darkenedReferenceAudioPath, "fixture-darkened-audio", "utf8");

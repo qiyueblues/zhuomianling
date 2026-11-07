@@ -1,0 +1,50 @@
+.appUpdateDialog {
+  width: min(470px, calc(100vw - 48px));
+  max-height: calc(100vh - 64px);
+  overflow: auto;
+  border: 1px solid #e2e7ef;
+  border-radius: 22px;
+  padding: 26px;
+  background: #fcfdff;
+  color: #273449;
+  box-shadow: 0 24px 80px #0f172a38;
+}
+.appUpdateDialog::backdrop { background: #15203966; backdrop-filter: blur(4px); }
+.appUpdateHeading, .appUpdateProgressLabel, .appUpdateProgressMeta, .appUpdateActions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.appUpdateIcon { display: grid; place-items: center; width: 46px; height: 46px; border-radius: 14px; color: #316cd9; background: #eaf1ff; }
+.appUpdateClose { align-self: flex-start; }
+.appUpdateDialog h2 { margin: 18px 0 8px; font-size: 21px; }
+.appUpdateDialog p { font-size: 13px; line-height: 1.75; color: #5d6b80; }
+.appUpdateDialog .appUpdateVersion { margin: 0 0 20px; color: #8290a3; font-size: 12px; }
+.appUpdateVersion span { margin: 0 6px; }
+.appUpdateChangelog { margin: 16px 0; border: 1px solid #e2e9f3; border-radius: 12px; background: #f0f4fa; }
+.appUpdateNotesToggle { display: flex; align-items: center; gap: 8px; border-radius: 11px; padding: 12px 14px; color: #4f6483; font-size: 13px; font-weight: 600; list-style: none; cursor: pointer; }
+.appUpdateNotesToggle::-webkit-details-marker { display: none; }
+.appUpdateNotesToggle:hover { color: #316cd9; background: #e8effb; }
+.appUpdateNotesToggle:focus-visible { outline: 2px solid #3979ed; outline-offset: 3px; }
+.appUpdateNotesChevron { margin-left: auto; }
+.appUpdateChangelog[open] .appUpdateNotesChevron { transform: rotate(180deg); }
+.appUpdateNotes { max-height: 180px; overflow: auto; margin: 0; padding: 0 14px 14px; font: inherit; font-size: 13px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+.appUpdateDownload { margin: 24px 0 16px; }
+.appUpdateProgressLabel { font-size: 13px; }
+.appUpdateProgressLabel strong { font-weight: 600; }
+.appUpdateDownload progress { display: block; width: 100%; height: 9px; margin: 14px 0 10px; border: 0; border-radius: 8px; overflow: hidden; accent-color: #3979ed; }
+.appUpdateDownload progress::-webkit-progress-bar { background: #e6edf7; border-radius: 8px; }
+.appUpdateDownload progress::-webkit-progress-value { background: #3979ed; border-radius: 8px; transition: width 180ms ease; }
+.appUpdateProgressMeta { font-size: 11px; color: #7b899c; font-variant-numeric: tabular-nums; }
+.appUpdateDialog .appUpdateError { color: #b64145; }
+.appUpdateActions { flex-wrap: wrap; justify-content: flex-end; margin-top: 24px; }
+.appUpdateIgnore { margin-right: auto; border: 0; background: transparent; padding: 8px 0; color: #7e899b; font-size: 12px; }
+.appUpdateIgnore:hover { color: #364c71; }
+.appUpdateReleaseLink { display: flex; align-items: center; gap: 5px; margin: 20px auto 0; padding: 5px; border: 0; background: transparent; font-size: 11px; color: #7b899c; }
+.appUpdateReleaseLink:hover { color: #316cd9; }
+.appUpdateDialog button:focus-visible { outline: 2px solid #3979ed; outline-offset: 3px; }
+.appUpdateDialog button:disabled { opacity: .5; cursor: default; }
+@media (prefers-reduced-motion: reduce) {
+  .appUpdateDownload progress::-webkit-progress-value { transition: none; }
+}

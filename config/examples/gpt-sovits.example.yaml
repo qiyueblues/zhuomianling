@@ -3,7 +3,9 @@
 
 custom:
   t2s_weights_path: path/to/your/model.ckpt
-  # Supported values: v1, v2, v3, v4, v2Pro, v2ProPlus
+  # Supported values: v1, v2, v3, v4, v2Pro, v2ProPlus, v5dev, v5turbo
+  # V5 requires an updated runtime and gsv-v5-pretrained/vocoder.pth.
+  # V5 LoRA also requires the matching gsv-v5-pretrained/s2Gv5dev.pth or s2Gv5turbo.pth.
   version: v2ProPlus
   vits_weights_path: path/to/your/model.pth
 

@@ -58,7 +58,14 @@ import { isPetVoiceModelVersion } from "../../../shared/validation/petVoiceModel
 import { petResourceProtocol, toPetResourceUrl } from "./petResourceProtocol";
 import { validateLive2DFolder } from "./live2dImportService";
 import { resolveLegacyVoiceModelPaths } from "./legacyVoiceModelPath";
-import { warmUpTextToSpeech } from "../speech/textToSpeech";
+import {
+  testTextToSpeechConnection,
+  warmUpTextToSpeech
+} from "../speech/textToSpeech";
+import {
+  ensureGptSoVitsEndpoint,
+  resetGptSoVitsRuntimeEndpoints
+} from "../speech/gptSoVitsRuntime";
 import { hashPresetVoiceText } from "../presetVoice/presetVoiceFingerprint";
 import { removePresetVoiceAudio } from "../presetVoice/presetVoiceStorage";
 import {
@@ -99,7 +106,6 @@ const themeIdPattern = /^[A-Za-z][A-Za-z0-9_-]{1,39}$/;
 const builtInThemeIds = new Set(["soft", "rock", "pixel", "journal", "cyber", "minimal", "custom"]);
 const expressionMappingKeyPattern = /^[A-Za-z][A-Za-z0-9_-]*$/;
 const allowedAvatarExtensions = new Set([".png", ".jpg", ".jpeg", ".webp"]);
-const gptSoVitsBaseUrl = "http://127.0.0.1:9880" as const;
 const defaultVoiceInferenceDevice = "auto" as const;
 const defaultVoiceHalfPrecision = true;
 const minReferenceAudioDurationSeconds = 3;
@@ -109,7 +115,8 @@ const minVoiceInputSilenceSeconds = 0.4;
 const maxVoiceInputSilenceSeconds = 2;
 const defaultVoiceInputSilenceSeconds = 1;
 const tencentAsrSecretScope = "tencent-asr";
-let managedGptSoVitsProcess: ChildProcess | undefined;
+const managedGptSoVitsProcesses = new Map<string, ChildProcess>();
+let voiceConnectionQueue: Promise<void> = Promise.resolve();
 let petIdAllocationQueue: Promise<void> = Promise.resolve();
 const avatarMimeTypes: Record<string, string> = {
   ".png": "image/png",
@@ -401,11 +408,11 @@ function getGptSoVitsLogPath(petId: string): string {
   return path.resolve(process.cwd(), "logs", `gpt-sovits-${assertValidPetId(petId)}.log`);
 }
 
-async function isGptSoVitsApiListening(): Promise<boolean> {
+async function isGptSoVitsApiListening(baseUrl: string): Promise<boolean> {
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 1200);
-    const response = await fetch(gptSoVitsBaseUrl, {
+    const response = await fetch(baseUrl, {
       method: "GET",
       signal: controller.signal
     });
@@ -417,11 +424,11 @@ async function isGptSoVitsApiListening(): Promise<boolean> {
   }
 }
 
-async function waitForGptSoVitsApi(timeoutMs: number): Promise<boolean> {
+async function waitForGptSoVitsApi(baseUrl: string, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
-    if (await isGptSoVitsApiListening()) {
+    if (await isGptSoVitsApiListening(baseUrl)) {
       return true;
     }
 
@@ -602,7 +609,8 @@ export function buildGptSoVitsRuntimeConfigContent(
 }
 
 async function launchGptSoVitsApiIfNeeded(draft: LocalPetVoiceModelDraft): Promise<void> {
-  if (await isGptSoVitsApiListening()) {
+  const endpoint = await ensureGptSoVitsEndpoint(draft.petId);
+  if (await isGptSoVitsApiListening(endpoint.baseUrl)) {
     return;
   }
 
@@ -637,6 +645,7 @@ async function launchGptSoVitsApiIfNeeded(draft: LocalPetVoiceModelDraft): Promi
       `python=${pythonExePath}`,
       `api=${apiScriptPath}`,
       `config=${runtimeConfigPath}`,
+      `port=${endpoint.port}`,
       `requestedDevice=${runtimeOptions.requestedDevice}`,
       `resolvedDevice=${runtimeOptions.device}`,
       `isHalf=${runtimeOptions.isHalf}`,
@@ -651,7 +660,7 @@ async function launchGptSoVitsApiIfNeeded(draft: LocalPetVoiceModelDraft): Promi
   const runtimePath = path.join(gptSoVitsRootPath, "runtime");
   const child = spawn(
     pythonExePath,
-    [apiScriptPath, "-c", runtimeConfigPath, "-a", "127.0.0.1", "-p", "9880"],
+    [apiScriptPath, "-c", runtimeConfigPath, "-a", endpoint.host, "-p", String(endpoint.port)],
     {
       cwd: gptSoVitsRootPath,
       detached: true,
@@ -663,10 +672,10 @@ async function launchGptSoVitsApiIfNeeded(draft: LocalPetVoiceModelDraft): Promi
       stdio: ["ignore", logFd, logFd]
     }
   );
-  managedGptSoVitsProcess = child;
+  managedGptSoVitsProcesses.set(draft.petId, child);
   child.once("exit", () => {
-    if (managedGptSoVitsProcess?.pid === child.pid) {
-      managedGptSoVitsProcess = undefined;
+    if (managedGptSoVitsProcesses.get(draft.petId)?.pid === child.pid) {
+      managedGptSoVitsProcesses.delete(draft.petId);
     }
   });
   child.unref();
@@ -674,28 +683,29 @@ async function launchGptSoVitsApiIfNeeded(draft: LocalPetVoiceModelDraft): Promi
 }
 
 export function stopManagedGptSoVitsApi(): void {
-  const child = managedGptSoVitsProcess;
-
-  if (!child?.pid) {
-    managedGptSoVitsProcess = undefined;
-    return;
-  }
-
-  try {
-    if (process.platform === "win32") {
-      spawn("taskkill.exe", ["/pid", String(child.pid), "/t", "/f"], {
-        detached: true,
-        stdio: "ignore",
-        windowsHide: true
-      }).unref();
-    } else {
-      child.kill("SIGTERM");
+  for (const [petId, child] of managedGptSoVitsProcesses) {
+    if (!child.pid) {
+      managedGptSoVitsProcesses.delete(petId);
+      continue;
     }
-  } catch {
-    // The app may be shutting down while the child process already exited.
-  } finally {
-    managedGptSoVitsProcess = undefined;
+
+    try {
+      if (process.platform === "win32") {
+        spawn("taskkill.exe", ["/pid", String(child.pid), "/t", "/f"], {
+          detached: true,
+          stdio: "ignore",
+          windowsHide: true
+        }).unref();
+      } else {
+        child.kill("SIGTERM");
+      }
+    } catch {
+      // The app may be shutting down while the child process already exited.
+    } finally {
+      managedGptSoVitsProcesses.delete(petId);
+    }
   }
+  resetGptSoVitsRuntimeEndpoints();
 }
 
 export async function resetLocalPetVoiceRuntimeState(): Promise<void> {
@@ -2690,7 +2700,7 @@ export async function pickLocalPetVoiceModelFile(
   };
 }
 
-export async function testLocalPetVoiceModelConnection(
+async function testLocalPetVoiceModelConnectionInternal(
   draft: LocalPetVoiceModelDraft
 ): Promise<LocalPetVoiceModelConnectionResult> {
   try {
@@ -2720,24 +2730,53 @@ export async function testLocalPetVoiceModelConnection(
   }
 
   try {
+    const endpoint = await ensureGptSoVitsEndpoint(draft.petId);
     await launchGptSoVitsApiIfNeeded(draft);
-    const connected = await waitForGptSoVitsApi(120_000);
+    const connected = await waitForGptSoVitsApi(endpoint.baseUrl, 120_000);
 
-    if (connected) {
+    if (!connected) {
       return {
-        ok: true,
-        message: "成功连接。"
+        ok: false,
+        message: [
+          "已尝试启动 GPT-SoVITS，但 120 秒内没有检测到 API 服务。",
+          await readRecentGptSoVitsLog(draft.petId)
+        ]
+          .filter(Boolean)
+          .join("\n\n最近日志：\n")
+      };
+    }
+
+    const synthesisController = new AbortController();
+    const synthesisTimeout = setTimeout(() => synthesisController.abort("timeout"), 45_000);
+    const synthesis = await testTextToSpeechConnection(
+      {
+        petId: draft.petId,
+        requestId: `connection-test-${Date.now()}`,
+        text: draft.language === "ja" ? "うん。" : draft.language === "en" ? "Mm." : "嗯。"
+      },
+      {
+        baseUrl: endpoint.baseUrl,
+        apiMode: "v2",
+        refAudioPath: draft.referenceAudioPath ?? "",
+        promptText: draft.referenceText.trim(),
+        promptLang: draft.referenceLanguage ?? draft.language,
+        textLang: draft.language,
+        textSplitMethod: "cut5",
+        mediaType: "wav"
+      },
+      synthesisController.signal
+    ).finally(() => clearTimeout(synthesisTimeout));
+
+    if (!synthesis.ok || !synthesis.audioBase64?.trim()) {
+      return {
+        ok: false,
+        message: `API 已连接，但真实语音合成失败：${synthesis.message || "没有返回音频数据。"}`
       };
     }
 
     return {
-      ok: false,
-      message: [
-        "已尝试启动 GPT-SoVITS，但 120 秒内没有检测到 API 服务。",
-        await readRecentGptSoVitsLog(draft.petId)
-      ]
-        .filter(Boolean)
-        .join("\n\n最近日志：\n")
+      ok: true,
+      message: "已连接，并完成真实语音合成测试。"
     };
   } catch (error) {
     const recentLog = await readRecentGptSoVitsLog(draft.petId);
@@ -2752,6 +2791,15 @@ export async function testLocalPetVoiceModelConnection(
         .join("\n\n最近日志：\n")
     };
   }
+}
+
+/** Serialize endpoint allocation and managed process startup across editor actions. */
+export async function testLocalPetVoiceModelConnection(
+  draft: LocalPetVoiceModelDraft
+): Promise<LocalPetVoiceModelConnectionResult> {
+  const run = voiceConnectionQueue.then(() => testLocalPetVoiceModelConnectionInternal(draft));
+  voiceConnectionQueue = run.then(() => undefined, () => undefined);
+  return run;
 }
 
 export async function saveLocalPetVoiceModel(

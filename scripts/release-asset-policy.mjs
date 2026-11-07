@@ -85,5 +85,42 @@ export function isProductionNodeModulePath(filePath) {
     "/node_modules/yazl/package.json"
   ]);
 
-  return normalizedPath.startsWith("/node_modules") && !approvedPaths.has(normalizedPath);
+  if (approvedPaths.has(normalizedPath)) return false;
+
+  // Reviewed updater dependencies, restricted to their runtime entry points
+  // and runtime trees. Unknown packages, CLIs, tests and source maps stay out.
+  const updaterRuntimeTrees = {
+    "semver": ["classes", "functions", "internal", "ranges", "index.js", "preload.js", "range.bnf"],
+    "electron-updater/node_modules/semver": ["classes", "functions", "internal", "ranges", "index.js", "preload.js", "range.bnf"],
+    "electron-updater": ["out"],
+    "builder-util-runtime": ["out"],
+    "fs-extra": ["lib"],
+    "graceful-fs": ["clone.js", "graceful-fs.js", "legacy-streams.js", "polyfills.js"],
+    "js-yaml": ["index.js", "lib"],
+    "jsonfile": ["index.js", "utils.js"],
+    "lazy-val": ["out"],
+    "lodash.escaperegexp": ["index.js"],
+    "lodash.isequal": ["index.js"],
+    "tiny-typed-emitter": ["lib"],
+    "debug": ["src"],
+    "ms": ["index.js"],
+    "sax": ["lib"],
+    "universalify": ["index.js"],
+    "argparse": ["argparse.js", "lib"]
+  };
+  if (normalizedPath === "/node_modules/electron-updater/node_modules") return false;
+  for (const [name, runtimePaths] of Object.entries(updaterRuntimeTrees)) {
+    const root = `/node_modules/${name}`;
+    if (normalizedPath === root) return false;
+    if (!normalizedPath.startsWith(`${root}/`)) continue;
+    const relative = normalizedPath.slice(root.length + 1);
+    if (/^(package\.json|licen[cs]e(?:[.-][a-z0-9]+)*|readme(?:\.md|\.txt)?|changelog\.md|history\.md)$/.test(relative)) return false;
+    if (/(^|\/)(?:tests?|__tests__|examples?|fixtures|bin)(\/|\.)/.test(relative)) return true;
+    if (runtimePaths.some((entry) => relative === entry || (
+      !entry.includes(".") && relative.startsWith(`${entry}/`) &&
+      (/\.(?:js|mjs|cjs)$/.test(relative) || !relative.split("/").pop().includes("."))
+    ))) return false;
+    return true;
+  }
+  return normalizedPath.startsWith("/node_modules");
 }

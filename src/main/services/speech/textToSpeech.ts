@@ -16,10 +16,11 @@ import {
   toUserFacingGptSoVitsError,
   validateReadableVoiceFile
 } from "./voiceResourceValidation";
+import { getGptSoVitsBaseUrl } from "./gptSoVitsRuntime";
 import type { PetMoodRangeId } from "../../../shared/mood";
 import { resolveMoodVoiceOverride } from "../mood/moodVoice";
 
-interface GptSoVitsPetConfig {
+export interface TextToSpeechConfig {
   baseUrl: string;
   apiMode?: "v2" | "beta";
   refAudioPath: string;
@@ -32,7 +33,7 @@ interface GptSoVitsPetConfig {
 
 interface GptSoVitsConfig {
   provider: "gpt-sovits";
-  pets: Record<string, GptSoVitsPetConfig | undefined>;
+  pets: Record<string, TextToSpeechConfig | undefined>;
 }
 
 interface GptSoVitsErrorBody {
@@ -43,7 +44,6 @@ interface GptSoVitsErrorBody {
 
 const configPath = path.resolve(process.cwd(), "config/tts.local.json");
 const localPetFileName = "pet.local.json";
-const localGptSoVitsBaseUrl = "http://127.0.0.1:9880";
 const textToSpeechTimeoutMs = 45_000;
 const maximumGptSoVitsErrorBodyChars = 16_000;
 const warmupControllers = new Map<string, AbortController>();
@@ -70,7 +70,7 @@ interface TextToSpeechOwnerState {
 interface TextToSpeechConfigSnapshot {
   petId: string;
   sessionId: string;
-  config: Promise<Required<GptSoVitsPetConfig>>;
+  config: Promise<Required<TextToSpeechConfig>>;
 }
 
 const textToSpeechOwners = new WeakMap<WebContents, TextToSpeechOwnerState>();
@@ -229,7 +229,7 @@ function getPetConfigPath(petId: string): string {
   return path.join(app.getPath("userData"), "pets", petId, localPetFileName);
 }
 
-async function readLocalPetVoiceConfig(petId: string): Promise<Required<GptSoVitsPetConfig> | undefined> {
+async function readLocalPetVoiceConfig(petId: string): Promise<Required<TextToSpeechConfig> | undefined> {
   try {
     const content = await fs.readFile(getPetConfigPath(petId), "utf8");
     let pet = normalizeLegacyPetDefinition(JSON.parse(content) as PetDefinition);
@@ -247,7 +247,7 @@ async function readLocalPetVoiceConfig(petId: string): Promise<Required<GptSoVit
     }
 
     return {
-      baseUrl: localGptSoVitsBaseUrl,
+      baseUrl: getGptSoVitsBaseUrl(petId),
       apiMode: "v2",
       refAudioPath: settings.referenceAudioPath,
       promptText: settings.referenceText,
@@ -279,7 +279,7 @@ async function readTextToSpeechConfig(): Promise<GptSoVitsConfig> {
   };
 }
 
-async function resolvePetVoiceConfig(petId: string): Promise<Required<GptSoVitsPetConfig>> {
+async function resolvePetVoiceConfig(petId: string): Promise<Required<TextToSpeechConfig>> {
   return (
     (await readLocalPetVoiceConfig(petId)) ??
     normalizePetConfig(petId, await readTextToSpeechConfig())
@@ -289,7 +289,7 @@ async function resolvePetVoiceConfig(petId: string): Promise<Required<GptSoVitsP
 function getPetVoiceConfigForRequest(
   target: WebContents,
   request: TextToSpeechRequest
-): Promise<Required<GptSoVitsPetConfig>> {
+): Promise<Required<TextToSpeechConfig>> {
   const sessionId = request.sessionId?.trim();
   if (!sessionId) {
     return resolvePetVoiceConfig(request.petId);
@@ -340,7 +340,7 @@ export function registerMoodTextToSpeechSnapshot(
 function normalizePetConfig(
   petId: string,
   config: GptSoVitsConfig
-): Required<GptSoVitsPetConfig> {
+): Required<TextToSpeechConfig> {
   const petConfig = config.pets[petId];
 
   if (!petConfig) {
@@ -417,7 +417,7 @@ async function synthesizeText(
   options?: {
     abortWarmup?: boolean;
     signal?: AbortSignal;
-    petConfig?: Promise<Required<GptSoVitsPetConfig>>;
+    petConfig?: Promise<Required<TextToSpeechConfig>>;
   }
 ): Promise<TextToSpeechResponse> {
   const text = request.text.trim();
@@ -453,7 +453,7 @@ async function synthesizeText(
     }
   }
 
-  let petConfig: Required<GptSoVitsPetConfig>;
+  let petConfig: Required<TextToSpeechConfig>;
 
   try {
     petConfig = await (options?.petConfig ?? resolvePetVoiceConfig(petId));
@@ -518,6 +518,7 @@ async function synthesizeText(
               prompt_lang: petConfig.promptLang,
               text_split_method: petConfig.textSplitMethod,
               media_type: petConfig.mediaType,
+              // Leave sample_steps/cfg_rate unset for the server's model-specific defaults.
               streaming_mode: false
             })
       })
@@ -588,6 +589,34 @@ async function synthesizeText(
 
 export interface PresetTextToSpeechResult extends TextToSpeechResponse {
   resolvedMoodRange?: PetMoodRangeId;
+}
+
+/**
+ * Runs a bounded, fixed-text synthesis against a draft configuration without
+ * requiring the draft to be persisted first. The editor uses this to verify
+ * that a reachable API can actually generate playable audio.
+ */
+export async function testTextToSpeechConnection(
+  request: TextToSpeechRequest,
+  config: TextToSpeechConfig,
+  signal: AbortSignal
+): Promise<TextToSpeechResponse> {
+  const normalizedConfig: Required<TextToSpeechConfig> = {
+    baseUrl: config.baseUrl.trim().replace(/\/+$/, ""),
+    apiMode: config.apiMode ?? "v2",
+    refAudioPath: config.refAudioPath,
+    promptText: config.promptText,
+    promptLang: config.promptLang ?? "zh",
+    textLang: config.textLang ?? "zh",
+    textSplitMethod: config.textSplitMethod ?? "cut5",
+    mediaType: config.mediaType ?? "wav"
+  };
+
+  return synthesizeText(request, {
+    signal,
+    petConfig: Promise.resolve(normalizedConfig),
+    abortWarmup: false
+  });
 }
 
 /** Main-process synthesis used by explicit preset generation jobs, without a renderer owner. */

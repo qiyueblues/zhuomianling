@@ -76,6 +76,14 @@ describe("旧版桌宠配置兼容", () => {
     expect(invalidPet.voiceModelSettings?.modelVersion).toBe("v2ProPlus");
   });
 
+  it.each(["v5dev", "v5turbo"])("保留 %s 声音配置而不回退为旧版本", (modelVersion) => {
+    const normalized = normalizeLegacyPetDefinition(legacyPet({
+      voiceModelSettings: { enabled: false, connected: false, modelVersion }
+    }));
+
+    expect(normalized.voiceModelSettings?.modelVersion).toBe(modelVersion);
+  });
+
   it("保留旧配置中已经存在的有效用户设置", () => {
     const normalized = normalizeLegacyPetDefinition(legacyPet({
       modelPath: "pet-resource://local/legacy-pet/live2d/model.model3.json",
